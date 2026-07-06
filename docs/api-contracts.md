@@ -85,6 +85,7 @@ Response:
       "author_id": "sec_uid",
       "cover_url": "/api/douyin/results/dyr_01J.../cover",
       "stream_url": "/api/douyin/results/dyr_01J.../stream",
+      "download_url": "/api/douyin/results/dyr_01J.../download",
       "duration": 18.2,
       "width": 1080,
       "height": 1920,
@@ -140,6 +141,16 @@ The stream endpoint should:
 - Attach required headers/cookies.
 - Return `206 Partial Content` for browser video seeking.
 - Return typed errors when the result expired or media cannot be resolved.
+
+### GET `/api/douyin/results/{result_id}/download`
+
+Streams the selected result as an attachment. The module resolves a no-watermark URL from the stored Douyin payload using the same URL strategy as the Evil0ctal download flow:
+
+- prefer available high-quality no-watermark play addresses
+- rewrite `playwm` media URLs to `play`
+- fall back to Douyin's `aweme/v1/play` URL when only a video URI is present
+
+The result must still exist in the TTL cache.
 
 ## Error Codes
 

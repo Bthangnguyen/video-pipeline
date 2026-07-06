@@ -47,7 +47,7 @@ async function search() {
 
 function renderResults(items) {
   results.innerHTML = items.map((item) => `
-    <article class="card" data-stream="${item.stream_url}">
+    <article class="card" data-stream="${item.stream_url}" data-download="${item.download_url}">
       <video controls preload="none" poster="${item.cover_url}"></video>
       <div class="card-body">
         <h2>${escapeHtml(item.title || item.description || item.douyin_aweme_id)}</h2>
@@ -55,7 +55,10 @@ function renderResults(items) {
           <span>@${escapeHtml(item.author_name || "unknown")}</span>
           <span>${formatDuration(item.duration)}</span>
         </div>
-        <button class="load-video" type="button">Load video</button>
+        <div class="actions">
+          <button class="load-video" type="button">Load video</button>
+          <a class="download-video" href="${item.download_url}">Download no watermark</a>
+        </div>
       </div>
     </article>
   `).join("");

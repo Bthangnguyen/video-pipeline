@@ -23,7 +23,20 @@ class StreamProxy:
             raise DouyinSearchError(STREAM_RESOLVE_FAILED, "No stream URL is available for this result.", retryable=True)
         return await self._proxy_url(remote_url, media_type="video/mp4", range_header=range_header)
 
-    async def _proxy_url(self, url: str, media_type: str | None, range_header: str | None = None):
+    async def proxy_download(self, result: DouyinResult):
+        remote_url = no_watermark_url_from_result(result)
+        if not remote_url:
+            raise DouyinSearchError(STREAM_RESOLVE_FAILED, "No no-watermark video URL is available for this result.", retryable=True)
+        filename = f"douyin_{result.douyin_aweme_id}.mp4"
+        return await self._proxy_url(remote_url, media_type="video/mp4", download_filename=filename)
+
+    async def _proxy_url(
+        self,
+        url: str,
+        media_type: str | None,
+        range_header: str | None = None,
+        download_filename: str | None = None,
+    ):
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -64,6 +77,8 @@ class StreamProxy:
         for key in ("content-length", "accept-ranges", "content-range"):
             if key in response.headers:
                 response_headers[key] = response.headers[key]
+        if download_filename:
+            response_headers["content-disposition"] = f'attachment; filename="{download_filename}"'
         return StreamingResponse(body(), status_code=response.status_code, media_type=content_type, headers=response_headers)
 
 
@@ -72,3 +87,45 @@ def _stream_from_raw(result: DouyinResult) -> str:
     play_addr = video.get("play_addr") if isinstance(video.get("play_addr"), dict) else {}
     urls = play_addr.get("url_list") if isinstance(play_addr.get("url_list"), list) else []
     return str(urls[0]) if urls else ""
+
+
+def no_watermark_url_from_result(result: DouyinResult) -> str:
+    video = result.raw.get("video") if isinstance(result.raw.get("video"), dict) else {}
+    bitrate_url = _first_bitrate_url(video)
+    if bitrate_url:
+        return bitrate_url
+
+    play_addr = video.get("play_addr") if isinstance(video.get("play_addr"), dict) else {}
+    play_url = _first_url(play_addr)
+    if play_url:
+        return play_url.replace("playwm", "play")
+
+    uri = str(play_addr.get("uri") or "")
+    if uri:
+        return f"https://aweme.snssdk.com/aweme/v1/play/?video_id={uri}&ratio=1080p&line=0"
+
+    return result.stream_remote_url.replace("playwm", "play") if result.stream_remote_url else ""
+
+
+def _first_bitrate_url(video: dict) -> str:
+    bitrate_info = video.get("bit_rate") or video.get("bitrateInfo") or []
+    if not isinstance(bitrate_info, list):
+        return ""
+    for bitrate in bitrate_info:
+        if not isinstance(bitrate, dict):
+            continue
+        play_addr = bitrate.get("play_addr") or bitrate.get("PlayAddr")
+        url = _first_url(play_addr)
+        if url:
+            return url
+    return ""
+
+
+def _first_url(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        urls = value.get("url_list") or value.get("UrlList") or []
+        if isinstance(urls, list) and urls:
+            return str(urls[0])
+    return ""

@@ -56,3 +56,11 @@ async def stream(result_id: str, request: Request):
         return await douyin_service.proxy_stream(result_id, request.headers.get("range"))
     except DouyinSearchError as error:
         return error_response(error)
+
+
+@router.get("/results/{result_id}/download")
+async def download(result_id: str):
+    try:
+        return await douyin_service.proxy_download(result_id)
+    except DouyinSearchError as error:
+        return error_response(error)

@@ -87,4 +87,5 @@ The frontend should never store or depend on `remote_url`. It should use:
 
 ```text
 /api/douyin/results/{result_id}/stream
+/api/douyin/results/{result_id}/download
 ```

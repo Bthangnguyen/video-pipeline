@@ -45,6 +45,7 @@ class PublicDouyinResult(BaseModel):
     author_id: str = ""
     cover_url: str
     stream_url: str
+    download_url: str
     duration: float = 0
     width: int = 0
     height: int = 0
@@ -60,4 +61,3 @@ class SearchResponse(BaseModel):
     items: list[PublicDouyinResult]
     next_cursor: str | None = None
     diagnostics: dict[str, Any] = Field(default_factory=dict)
-

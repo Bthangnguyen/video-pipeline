@@ -60,3 +60,34 @@ def test_stream_endpoint_forwards_range(monkeypatch):
 
     assert response.status_code == 206
     assert response.content == b"video"
+
+
+def test_download_endpoint_returns_attachment(monkeypatch):
+    client = TestClient(app)
+    douyin_service.store.put_many(
+        [
+            DouyinResult(
+                result_id="download-test",
+                douyin_aweme_id="aweme-download",
+                raw={"video": {"play_addr": {"uri": "video-uri", "url_list": ["https://example.test/playwm/video.mp4"]}}},
+            )
+        ]
+    )
+
+    async def fake_proxy_download(result):
+        assert result.douyin_aweme_id == "aweme-download"
+        from fastapi.responses import Response
+
+        return Response(
+            content=b"video",
+            media_type="video/mp4",
+            headers={"content-disposition": 'attachment; filename="douyin_aweme-download.mp4"'},
+        )
+
+    monkeypatch.setattr(douyin_service.stream_proxy, "proxy_download", fake_proxy_download)
+
+    response = client.get("/api/douyin/results/download-test/download")
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == 'attachment; filename="douyin_aweme-download.mp4"'
+    assert response.content == b"video"

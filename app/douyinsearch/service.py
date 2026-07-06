@@ -81,6 +81,9 @@ class DouyinSearchService:
     async def proxy_stream(self, result_id: str, range_header: str | None = None):
         return await self.stream_proxy.proxy_stream(self._stored_result(result_id), range_header)
 
+    async def proxy_download(self, result_id: str):
+        return await self.stream_proxy.proxy_download(self._stored_result(result_id))
+
     async def close(self) -> None:
         await self.browser.close()
 
@@ -124,6 +127,7 @@ class DouyinSearchService:
             author_id=result.author_id,
             cover_url=f"/api/douyin/results/{result.result_id}/cover",
             stream_url=f"/api/douyin/results/{result.result_id}/stream",
+            download_url=f"/api/douyin/results/{result.result_id}/download",
             duration=result.duration,
             width=result.width,
             height=result.height,

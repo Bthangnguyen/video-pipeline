@@ -18,6 +18,7 @@ Build a clean, reusable Douyin search module that can later be integrated into a
 - Normalize search results into a stable response shape.
 - Resolve playable video streams.
 - Stream video through the backend for browser preview.
+- Download selected search results as no-watermark MP4 when Douyin exposes a resolvable media URL.
 - Report typed errors for cookie, captcha, network, and parsing failures.
 
 ## Non-Goals
