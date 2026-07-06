@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VideoDesign</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="workflow-page">
+  <main class="workflow-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Module 2</p>
+        <h1>VideoDesign</h1>
+      </div>
+      <div class="topbar-actions">
+        <span id="status" class="status-pill">Ready</span>
+        <a class="nav-link" href="/">Douyin Search</a>
+      </div>
+    </header>
+
+    <section class="workflow-overview">
+      <div class="progress-header">
+        <strong>Workflow progress</strong>
+        <span id="progress-label">0/8 steps complete</span>
+      </div>
+      <div class="progress-track"><div id="progress-fill"></div></div>
+      <div id="stepper" class="stepper" aria-label="Video design steps"></div>
+    </section>
+
+    <section class="workflow-grid">
+      <div class="workflow-main">
+        <article class="step-card" data-step-card="create">
+          <div class="step-card-head">
+            <span class="step-number">1</span>
+            <div>
+              <h2>Create Project</h2>
+              <p>Start with a script, or add an idea for DeepSeek to generate one.</p>
+            </div>
+            <span class="step-state" data-step-state="create">waiting</span>
+          </div>
+          <textarea id="script">Cats can recognize your voice. They often ignore it anyway. This makes cat videos funny.</textarea>
+          <div class="fields">
+            <label>Idea for DeepSeek <input id="idea" placeholder="Optional topic or rough idea"></label>
+            <label>Target duration <input id="target-duration" type="number" min="5" value="45"></label>
+            <label>Platform
+              <select id="target-platform">
+                <option value="tiktok">TikTok / Douyin</option>
+                <option value="shorts">YouTube Shorts</option>
+                <option value="reels">Reels</option>
+              </select>
+            </label>
+          </div>
+          <button id="create" class="primary-action">Create project</button>
+        </article>
+
+        <article class="step-card" data-step-card="script">
+          <div class="step-card-head">
+            <span class="step-number">2</span>
+            <div>
+              <h2>Generate Script</h2>
+              <p>Use DeepSeek when you want the idea turned into a structured script.</p>
+            </div>
+            <span class="step-state" data-step-state="script">waiting</span>
+          </div>
+          <div class="button-row">
+            <button id="generate-script">Generate with DeepSeek</button>
+            <button id="use-script">Use current script</button>
+          </div>
+        </article>
+
+        <article class="step-card" data-step-card="plan">
+          <div class="step-card-head">
+            <span class="step-number">3</span>
+            <div>
+              <h2>Plan Scenes</h2>
+              <p>Parse the script into natural scene beats before material search.</p>
+            </div>
+            <span class="step-state" data-step-state="plan">waiting</span>
+          </div>
+          <div class="fields">
+            <label>Scene pacing
+              <select id="split-mode">
+                <option value="normal">normal</option>
+                <option value="dense">dense</option>
+                <option value="sparse">sparse</option>
+                <option value="manual">manual</option>
+                <option value="auto">auto</option>
+              </select>
+            </label>
+            <label>Max words per scene <input id="max-words" type="number" min="4" max="80" value="18"></label>
+            <label>Target scene seconds <input id="scene-seconds" type="number" min="1" value="4"></label>
+          </div>
+          <button id="plan">Plan scenes</button>
+        </article>
+
+        <article class="step-card" data-step-card="tts">
+          <div class="step-card-head">
+            <span class="step-number">4</span>
+            <div>
+              <h2>Generate TTS Timing</h2>
+              <p>Create English voice timing so captions/text match the voiceover.</p>
+            </div>
+            <span class="step-state" data-step-state="tts">waiting</span>
+          </div>
+          <div class="fields">
+            <label>TTS provider
+              <select id="tts-provider">
+                <option value="timing_only">timing_only</option>
+                <option value="free_tts">free_tts</option>
+              </select>
+            </label>
+            <label>Voice ID <input id="voice-id" value="en-US-AriaNeural"></label>
+          </div>
+          <button id="tts">Generate TTS timing</button>
+        </article>
+
+        <article class="step-card" data-step-card="search">
+          <div class="step-card-head">
+            <span class="step-number">5</span>
+            <div>
+              <h2>Search Douyin Materials</h2>
+              <p>Run Douyin search separately for each planned scene.</p>
+            </div>
+            <span class="step-state" data-step-state="search">waiting</span>
+          </div>
+          <div class="fields">
+            <label>Candidates per scene <input id="candidate-count" type="number" min="1" max="10" value="4"></label>
+            <label>Queries per scene <input id="query-count" type="number" min="1" max="3" value="1"></label>
+          </div>
+          <button id="search-materials">Search materials</button>
+        </article>
+
+        <article class="step-card" data-step-card="review">
+          <div class="step-card-head">
+            <span class="step-number">6</span>
+            <div>
+              <h2>Review Scene Choices</h2>
+              <p>Approve the Douyin video you want for each scene before downloading.</p>
+            </div>
+            <span class="step-state" data-step-state="review">waiting</span>
+          </div>
+          <div id="review" class="review-empty">Scene candidates will appear here after material search.</div>
+        </article>
+
+        <article class="step-card" data-step-card="download">
+          <div class="step-card-head">
+            <span class="step-number">7</span>
+            <div>
+              <h2>Download Approved Videos</h2>
+              <p>Only approved scene videos are downloaded into local material assets.</p>
+            </div>
+            <span class="step-state" data-step-state="download">waiting</span>
+          </div>
+          <button id="download">Download approved videos</button>
+        </article>
+
+        <article class="step-card" data-step-card="studio">
+          <div class="step-card-head">
+            <span class="step-number">8</span>
+            <div>
+              <h2>Create Studio Timeline</h2>
+              <p>Build a timeline JSON from approved and downloaded scenes.</p>
+            </div>
+            <span class="step-state" data-step-state="studio">waiting</span>
+          </div>
+          <button id="studio">Create timeline</button>
+          <div id="timeline" class="studio-empty">Timeline preview will appear after studio creation.</div>
+        </article>
+      </div>
+
+      <aside class="workflow-side">
+        <section class="side-panel">
+          <h2>Current Project</h2>
+          <dl class="project-facts">
+            <dt>Project</dt>
+            <dd id="project-id">Not created</dd>
+            <dt>Scenes</dt>
+            <dd id="scene-count">0</dd>
+            <dt>Approved</dt>
+            <dd id="approved-count">0</dd>
+            <dt>Downloaded</dt>
+            <dd id="downloaded-count">0</dd>
+          </dl>
+        </section>
+        <section class="side-panel">
+          <h2>Activity</h2>
+          <div id="activity-log" class="activity-log"></div>
+        </section>
+      </aside>
+    </section>
+  </main>
+  <script src="/static/videodesign.js"></script>
+</body>
+</html>

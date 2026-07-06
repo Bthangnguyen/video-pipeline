@@ -1,14 +1,32 @@
-# Douyin Search Module Specs
+# Video Pipeline Specs
 
-This repository is scoped to one module only: `douyinsearch`.
+This repository currently implements `douyinsearch` and the playable V1 slice of `videodesign`.
 
 The module searches Douyin by keyword using cookies and Playwright, returns normalized video results, and exposes backend stream/proxy endpoints so results can be previewed directly in a web UI.
 
-Anything outside this module, such as project editing, timeline, rendering, captions, or other media sources, is intentionally out of scope until this module is complete.
+`videodesign` now has a linear web workflow for project creation, DeepSeek script generation, natural scene planning, English TTS timing/audio generation, Douyin video matching with progress updates, pre-studio approval, approved-video download, persisted project JSON, and a studio timeline preview that plays downloaded local material assets.
 
-## Module Goal
+## Current Goal
 
-Build a clean, reusable Douyin search module that can later be integrated into a larger automation platform.
+Build the video pipeline as small modules that can be developed and tested independently before they are connected into a full automation platform.
+
+## Current State
+
+- `douyinsearch` is the source video module.
+- `/videodesign` is the second module UI.
+- VideoDesign projects are stored under `storage/videodesign/{project_id}/project.json`.
+- Scene planning parses scripts by natural sentence/line breaks first. `max_words_per_scene` is only a soft safety limit for overlong sentences.
+- `timing_only` TTS is a fast test mode that creates silent audio plus estimated caption timing.
+- `free_tts` uses `edge-tts` for a real English voice path.
+- Studio preview shows downloaded media, captions/text overlays, layer tracks, and timeline JSON.
+
+## Next Direction
+
+- Import/export full project JSON from the UI so a generated project can be restored without manual recovery.
+- Improve scene review editing: rewrite scene text, matching keywords, and visual brief before Douyin search.
+- Add manual per-scene Douyin re-search and candidate replacement inside the review board.
+- Add draggable text/icon layers on the Studio canvas and timeline timing controls.
+- Add a render module that consumes `TimelineDraft` and exports an MP4 with FFmpeg.
 
 ## Module Responsibilities
 
@@ -21,10 +39,8 @@ Build a clean, reusable Douyin search module that can later be integrated into a
 - Download selected search results as no-watermark MP4 when Douyin exposes a resolvable media URL.
 - Report typed errors for cookie, captcha, network, and parsing failures.
 
-## Non-Goals
+## Non-Goals For Current V1
 
-- Project management.
-- Timeline editing.
 - FFmpeg rendering.
 - Multi-source search.
 - TikTok or other source adapters.
@@ -32,12 +48,18 @@ Build a clean, reusable Douyin search module that can later be integrated into a
 
 ## Specs
 
+### Implemented Module
+
 - [Module Product Spec](docs/product-spec.md)
 - [Module Architecture](docs/architecture.md)
 - [Douyin Search Design](docs/modules/douyin-search.md)
 - [API Contracts](docs/api-contracts.md)
 - [Data Model](docs/data-model.md)
 - [Implementation Plan](docs/implementation-plan.md)
+
+### Video Design Module
+
+- [Video Design Module Spec](docs/modules/video-design.md)
 
 ## Run
 

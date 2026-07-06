@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.douyin import router as douyin_router
+from app.api.videodesign import router as videodesign_router
 from app.douyinsearch.service import douyin_service
 
 
@@ -17,6 +18,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="DouyinSearch", version="0.1.0", lifespan=lifespan)
 app.include_router(douyin_router, prefix="/api/douyin", tags=["douyinsearch"])
+app.include_router(videodesign_router, prefix="/api/videodesign", tags=["videodesign"])
 
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
@@ -30,3 +32,10 @@ async def index():
         return FileResponse(index_path)
     return {"module": "douyinsearch", "docs": "/docs"}
 
+
+@app.get("/videodesign")
+async def videodesign_index():
+    index_path = static_dir / "videodesign.html"
+    if index_path.exists():
+        return FileResponse(index_path)
+    return {"module": "videodesign", "docs": "/docs"}

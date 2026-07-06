@@ -14,6 +14,15 @@ def test_health():
     assert response.json()["module"] == "douyinsearch"
 
 
+def test_videodesign_page():
+    client = TestClient(app)
+
+    response = client.get("/videodesign")
+
+    assert response.status_code == 200
+    assert "VideoDesign" in response.text
+
+
 def test_direct_api_stub():
     client = TestClient(app)
 

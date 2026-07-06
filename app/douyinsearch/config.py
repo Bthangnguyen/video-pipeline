@@ -11,7 +11,7 @@ def _load_env_file(path: Path = Path(".env")) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        os.environ.setdefault(key.strip().lstrip("\ufeff"), value.strip().strip('"').strip("'"))
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -33,7 +33,7 @@ class Settings:
     signature_dir: Path = Path(
         os.getenv(
             "DOUYIN_SIGNATURE_DIR",
-            r"D:\Workspaces\automation videos\Douyin_TikTok_Download_API\crawlers\douyin\web",
+            "./vendor/Douyin_TikTok_Download_API/crawlers/douyin/web",
         )
     )
     result_ttl_seconds: int = int(os.getenv("DOUYIN_RESULT_TTL_SECONDS", "1800"))

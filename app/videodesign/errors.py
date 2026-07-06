@@ -1,0 +1,25 @@
+class VideoDesignError(Exception):
+    def __init__(self, code: str, message: str, retryable: bool = False):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+
+    def to_payload(self) -> dict:
+        return {"code": self.code, "message": self.message, "retryable": self.retryable}
+
+
+PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"
+SCENE_NOT_FOUND = "SCENE_NOT_FOUND"
+INVALID_PROJECT_INPUT = "INVALID_PROJECT_INPUT"
+SCRIPT_REQUIRED = "SCRIPT_REQUIRED"
+DEEPSEEK_API_KEY_MISSING = "DEEPSEEK_API_KEY_MISSING"
+SCRIPT_GENERATION_FAILED = "SCRIPT_GENERATION_FAILED"
+TTS_PROVIDER_UNAVAILABLE = "TTS_PROVIDER_UNAVAILABLE"
+TTS_GENERATION_FAILED = "TTS_GENERATION_FAILED"
+MATERIAL_SEARCH_FAILED = "MATERIAL_SEARCH_FAILED"
+MATERIAL_SEARCH_TIMEOUT = "MATERIAL_SEARCH_TIMEOUT"
+CANDIDATE_NOT_FOUND = "CANDIDATE_NOT_FOUND"
+DOWNLOAD_FAILED = "DOWNLOAD_FAILED"
+SCENE_NOT_READY = "SCENE_NOT_READY"
+TEXT_TTS_SYNC_STALE = "TEXT_TTS_SYNC_STALE"

@@ -30,6 +30,24 @@ class StreamProxy:
         filename = f"douyin_{result.douyin_aweme_id}.mp4"
         return await self._proxy_url(remote_url, media_type="video/mp4", download_filename=filename)
 
+    async def download_to_file(self, result: DouyinResult, output_path):
+        remote_url = no_watermark_url_from_result(result)
+        if not remote_url:
+            raise DouyinSearchError(STREAM_RESOLVE_FAILED, "No no-watermark video URL is available for this result.", retryable=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        headers = self._headers()
+        timeout = httpx.Timeout(30.0, read=120.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                async with client.stream("GET", remote_url, headers=headers) as response:
+                    response.raise_for_status()
+                    with output_path.open("wb") as handle:
+                        async for chunk in response.aiter_bytes():
+                            handle.write(chunk)
+        except httpx.HTTPError as exc:
+            raise DouyinSearchError(NETWORK_ERROR, f"Could not download remote media: {exc}", retryable=True) from exc
+        return output_path
+
     async def _proxy_url(
         self,
         url: str,
@@ -37,20 +55,7 @@ class StreamProxy:
         range_header: str | None = None,
         download_filename: str | None = None,
     ):
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept": "*/*",
-            "Accept-Encoding": "identity",
-            "Referer": "https://www.douyin.com/",
-        }
-        if self.cookie_file.exists():
-            cookie_header = cookie_header_from_file(self.cookie_file)
-            if cookie_header:
-                headers["Cookie"] = cookie_header
-
+        headers = self._headers()
         timeout = httpx.Timeout(30.0, read=120.0)
         client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
         try:
@@ -80,6 +85,23 @@ class StreamProxy:
         if download_filename:
             response_headers["content-disposition"] = f'attachment; filename="{download_filename}"'
         return StreamingResponse(body(), status_code=response.status_code, media_type=content_type, headers=response_headers)
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Referer": "https://www.douyin.com/",
+        }
+        if self.cookie_file.exists():
+            cookie_header = cookie_header_from_file(self.cookie_file)
+            if cookie_header:
+                headers["Cookie"] = cookie_header
+
+        return headers
 
 
 def _stream_from_raw(result: DouyinResult) -> str:
