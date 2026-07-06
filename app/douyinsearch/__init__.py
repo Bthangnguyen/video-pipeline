@@ -1,0 +1,2 @@
+"""Standalone Douyin search module."""
+

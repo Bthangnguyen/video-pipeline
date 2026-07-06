@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DouyinSearch</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>DouyinSearch</h1>
+      <button id="session-check">Check Session</button>
+      <span id="session-state"></span>
+    </header>
+
+    <section class="searchbar">
+      <input id="keyword" placeholder="Search keyword" autocomplete="off">
+      <label><input id="translate" type="checkbox" checked> Translate</label>
+      <input id="limit" type="number" min="1" max="50" value="12">
+      <button id="search">Search</button>
+    </section>
+
+    <p id="message"></p>
+    <section id="results" class="results"></section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
+

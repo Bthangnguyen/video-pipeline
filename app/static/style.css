@@ -1,0 +1,104 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #101418;
+  color: #f2f5f7;
+  font-family: Arial, sans-serif;
+}
+
+main {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 24px 0 48px;
+}
+
+header,
+.searchbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+h1 {
+  margin-right: auto;
+  font-size: 28px;
+}
+
+input,
+button {
+  border: 1px solid #34414f;
+  border-radius: 6px;
+  background: #18212a;
+  color: #f2f5f7;
+  padding: 10px 12px;
+}
+
+button {
+  cursor: pointer;
+  background: #2d6cdf;
+  border-color: #2d6cdf;
+}
+
+.load-video {
+  width: 100%;
+  margin-top: 12px;
+}
+
+#keyword {
+  min-width: min(520px, 100%);
+  flex: 1;
+}
+
+#limit {
+  width: 80px;
+}
+
+#message,
+#session-state {
+  color: #a8b3bd;
+}
+
+.results {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.card {
+  background: #18212a;
+  border: 1px solid #2a3541;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.card video,
+.card img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  object-fit: cover;
+  background: #0a0d10;
+}
+
+.card-body {
+  padding: 12px;
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #a8b3bd;
+  font-size: 13px;
+}
