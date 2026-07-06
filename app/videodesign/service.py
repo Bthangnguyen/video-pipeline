@@ -72,6 +72,21 @@ class VideoDesignService:
         self.store.put(project)
         return {"success": True, "project": project.model_dump()}
 
+    def get_project(self, project_id: str) -> dict:
+        project = self.store.get(project_id)
+        return {"success": True, "project": project.model_dump()}
+
+    def update_project(self, project_id: str, patch: dict) -> dict:
+        project = self.store.get(project_id)
+        for key in ("idea", "script", "target_platform", "aspect_ratio", "target_duration_seconds", "language", "style_brief"):
+            if key in patch:
+                value = patch[key]
+                setattr(project, key, value.strip() if isinstance(value, str) else value)
+        if "script" in patch:
+            project.script_source = "user" if (project.script or "").strip() else "deepseek_pending"
+        self.store.put(project)
+        return {"success": True, "project": project.model_dump()}
+
     def set_preset(self, project_id: str, preset: dict) -> dict:
         project = self.store.get(project_id)
         project.design_preset = preset
@@ -364,6 +379,8 @@ class VideoDesignService:
                     item.start_seconds = patch.start_seconds
                 if patch.end_seconds is not None:
                     item.end_seconds = patch.end_seconds
+                if patch.source_ref is not None:
+                    item.source_ref = patch.source_ref
                 if patch.transform is not None:
                     item.transform = patch.transform
                 if patch.style is not None:

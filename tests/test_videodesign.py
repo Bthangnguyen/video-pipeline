@@ -76,6 +76,26 @@ def test_videodesign_tts_timing_only_generates_caption_chunks():
     assert scene["duration_seconds"] > 0
 
 
+def test_videodesign_get_and_update_project():
+    client = TestClient(app)
+    project_id = _create_project(client)
+
+    update_response = client.patch(
+        f"/api/videodesign/projects/{project_id}",
+        json={"script": "A cleaner test script. It has two beats.", "style_brief": "clean social short"},
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.json()["project"]["script_source"] == "user"
+
+    get_response = client.get(f"/api/videodesign/projects/{project_id}")
+
+    assert get_response.status_code == 200
+    project = get_response.json()["project"]
+    assert project["script"] == "A cleaner test script. It has two beats."
+    assert project["style_brief"] == "clean social short"
+
+
 def test_videodesign_progress_endpoint_defaults_to_idle():
     client = TestClient(app)
     project_id = _create_project(client)
@@ -87,6 +107,43 @@ def test_videodesign_progress_endpoint_defaults_to_idle():
     assert progress["stage"] == "idle"
     assert progress["current"] == 0
     assert progress["total"] == 0
+
+
+def test_videodesign_search_single_scene_endpoint(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_id = plan_response.json()["scenes"][0]["scene_id"]
+
+    async def fake_search(request):
+        return SearchResponse(
+            keyword=request.keyword,
+            search_keyword=request.keyword,
+            strategy_used="browser",
+            items=[
+                PublicDouyinResult(
+                    result_id="single-scene-result",
+                    douyin_aweme_id="aweme-single",
+                    title="cat voice test",
+                    cover_url="/cover",
+                    stream_url="/stream",
+                    download_url="/download",
+                    duration=5.0,
+                )
+            ],
+        )
+
+    monkeypatch.setattr(douyin_service, "search", fake_search)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/scenes/{scene_id}/materials/search",
+        json={"candidates_per_scene": 1, "queries_per_scene": 1},
+    )
+
+    assert response.status_code == 200
+    rows = response.json()["rows"]
+    selected = next(row for row in rows if row["scene"]["scene_id"] == scene_id)
+    assert selected["candidates"][0]["douyin_aweme_id"] == "aweme-single"
 
 
 def test_videodesign_review_download_and_timeline(monkeypatch):
@@ -173,6 +230,15 @@ def test_videodesign_review_download_and_timeline(monkeypatch):
     timeline = studio_response.json()["timeline"]
     assert timeline["items"][0]["source_ref"]["source"] == "material_asset"
     assert timeline["items"][0]["source_ref"]["media_url"].startswith(f"/api/videodesign/projects/{project_id}/materials/")
+
+    text_item = next(item for item in timeline["items"] if item["type"] == "text")
+    patch_response = client.patch(
+        f"/api/videodesign/projects/{project_id}/timeline/items/{text_item['item_id']}",
+        json={"source_ref": {"text": "Edited Studio text"}, "transform": {"x": 42, "y": 16}},
+    )
+    assert patch_response.status_code == 200
+    assert patch_response.json()["item"]["source_ref"]["text"] == "Edited Studio text"
+    assert patch_response.json()["item"]["transform"]["x"] == 42
 
     material_response = client.get(timeline["items"][0]["source_ref"]["media_url"])
     assert material_response.status_code == 200

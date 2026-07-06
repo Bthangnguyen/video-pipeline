@@ -1,0 +1,62 @@
+# Video Design Flow Specs
+
+Status: draft for UI/UX implementation.
+
+This folder splits the VideoDesign product into focused functional flows based on the reference screenshots in `design template/`.
+
+## Flow Map
+
+```text
+Project Start
+-> Script Creation
+-> Template & Preset Setup
+-> Scene Plan & Material Review
+-> Studio Timeline
+```
+
+Each flow should feel like a dedicated screen, not a section in one long form.
+
+## Specs
+
+- [01 Project Start Flow](01-project-start-flow.md)
+- [02 Script Creation Flow](02-script-creation-flow.md)
+- [03 Template Preset Flow](03-template-preset-flow.md)
+- [04 Scene Plan And Material Review Flow](04-scene-plan-material-review-flow.md)
+- [05 Studio Timeline Flow](05-studio-timeline-flow.md)
+
+## Shared Shell
+
+All post-login/project screens use the same shell:
+
+- left global icon rail
+- top project/action bar when inside a project
+- main working canvas
+- optional sticky right summary rail
+- light setup pages, studio workspace with stronger editing controls
+
+Global icon rail:
+
+```text
+Home
+Projects
+Douyin Search
+Templates
+Studio
+Settings
+```
+
+Project action bar:
+
+```text
+Project title | Save state | Undo | Redo | Preview | Export disabled until render module exists
+```
+
+## UX Rules
+
+- Show one primary decision per screen.
+- Keep generated/expensive actions behind explicit CTA buttons.
+- Persist after every meaningful change.
+- Make the current project state visible without requiring the user to inspect JSON.
+- Do not start Douyin search until script, scene plan, and preset choices are visible.
+- Studio must work from downloaded `MaterialAsset` files, not expiring Douyin result IDs.
+

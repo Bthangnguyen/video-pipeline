@@ -6,190 +6,264 @@
   <title>VideoDesign</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="workflow-page">
-  <main class="workflow-shell">
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">Module 2</p>
-        <h1>VideoDesign</h1>
-      </div>
-      <div class="topbar-actions">
-        <span id="status" class="status-pill">Ready</span>
-        <a class="nav-link" href="/">Douyin Search</a>
-      </div>
-    </header>
+<body class="vd-app-page">
+  <div class="vd-shell">
+    <aside class="vd-rail" aria-label="VideoDesign navigation">
+      <div class="vd-brand">VD</div>
+      <button class="vd-rail-item" data-view-target="start" type="button"><span>Home</span></button>
+      <button class="vd-rail-item" data-view-target="script" type="button"><span>Script</span></button>
+      <button class="vd-rail-item" data-view-target="template" type="button"><span>Template</span></button>
+      <button class="vd-rail-item" data-view-target="plan" type="button"><span>Plan</span></button>
+      <button class="vd-rail-item" data-view-target="materials" type="button"><span>Media</span></button>
+      <button class="vd-rail-item" data-view-target="studio" type="button"><span>Studio</span></button>
+      <a class="vd-rail-link" href="/">Douyin</a>
+    </aside>
 
-    <section class="workflow-overview">
-      <div class="progress-header">
-        <strong>Workflow progress</strong>
-        <span id="progress-label">0/8 steps complete</span>
-      </div>
-      <div class="progress-track"><div id="progress-fill"></div></div>
-      <div id="stepper" class="stepper" aria-label="Video design steps"></div>
-    </section>
+    <main class="vd-main">
+      <header class="vd-topbar">
+        <div>
+          <p class="vd-kicker">Video pipeline</p>
+          <h1 id="view-title">Create video</h1>
+        </div>
+        <div class="vd-top-actions">
+          <span id="vd-project-chip" class="vd-chip">No project</span>
+          <span id="vd-status" class="vd-status" data-mode="idle">Ready</span>
+        </div>
+      </header>
 
-    <section class="workflow-grid">
-      <div class="workflow-main">
-        <article class="step-card" data-step-card="create">
-          <div class="step-card-head">
-            <span class="step-number">1</span>
-            <div>
-              <h2>Create Project</h2>
-              <p>Start with a script, or add an idea for DeepSeek to generate one.</p>
-            </div>
-            <span class="step-state" data-step-state="create">waiting</span>
-          </div>
-          <textarea id="script">Cats can recognize your voice. They often ignore it anyway. This makes cat videos funny.</textarea>
-          <div class="fields">
-            <label>Idea for DeepSeek <input id="idea" placeholder="Optional topic or rough idea"></label>
-            <label>Target duration <input id="target-duration" type="number" min="5" value="45"></label>
-            <label>Platform
-              <select id="target-platform">
+      <nav class="vd-flow-tabs" aria-label="Workflow stages">
+        <button data-view-target="start" type="button">Start</button>
+        <button data-view-target="script" type="button">Script</button>
+        <button data-view-target="template" type="button">Template</button>
+        <button data-view-target="plan" type="button">Plan</button>
+        <button data-view-target="materials" type="button">Materials</button>
+        <button data-view-target="studio" type="button">Studio</button>
+      </nav>
+
+      <section class="vd-view" data-view="start">
+        <div class="vd-start">
+          <section class="vd-hero-panel">
+            <p class="vd-kicker">AI short video builder</p>
+            <h2>Turn a script or idea into a reviewable video plan.</h2>
+            <textarea id="start-prompt" placeholder="Create a faceless TikTok video about cat facts, productivity habits, or any short-form idea.">Cats can recognize your voice. They often ignore it anyway. This makes cat videos funny.</textarea>
+            <div class="vd-start-controls">
+              <label>Duration <input id="start-duration" type="range" min="15" max="120" step="5" value="45"></label>
+              <strong id="start-duration-label">45 seconds</strong>
+              <select id="start-platform">
                 <option value="tiktok">TikTok / Douyin</option>
                 <option value="shorts">YouTube Shorts</option>
                 <option value="reels">Reels</option>
               </select>
-            </label>
-          </div>
-          <button id="create" class="primary-action">Create project</button>
-        </article>
-
-        <article class="step-card" data-step-card="script">
-          <div class="step-card-head">
-            <span class="step-number">2</span>
-            <div>
-              <h2>Generate Script</h2>
-              <p>Use DeepSeek when you want the idea turned into a structured script.</p>
             </div>
-            <span class="step-state" data-step-state="script">waiting</span>
-          </div>
-          <div class="button-row">
-            <button id="generate-script">Generate with DeepSeek</button>
-            <button id="use-script">Use current script</button>
-          </div>
-        </article>
-
-        <article class="step-card" data-step-card="plan">
-          <div class="step-card-head">
-            <span class="step-number">3</span>
-            <div>
-              <h2>Plan Scenes</h2>
-              <p>Parse the script into natural scene beats before material search.</p>
+            <div class="vd-button-row">
+              <button id="create-project" class="vd-primary" type="button">Create video</button>
+              <button id="load-saved-project" type="button">Load saved project</button>
             </div>
-            <span class="step-state" data-step-state="plan">waiting</span>
-          </div>
-          <div class="fields">
-            <label>Scene pacing
-              <select id="split-mode">
-                <option value="normal">normal</option>
-                <option value="dense">dense</option>
-                <option value="sparse">sparse</option>
-                <option value="manual">manual</option>
-                <option value="auto">auto</option>
-              </select>
-            </label>
-            <label>Max words per scene <input id="max-words" type="number" min="4" max="80" value="18"></label>
-            <label>Target scene seconds <input id="scene-seconds" type="number" min="1" value="4"></label>
-          </div>
-          <button id="plan">Plan scenes</button>
-        </article>
+          </section>
+          <aside class="vd-side-note">
+            <h3>Flow</h3>
+            <ol>
+              <li>Write or generate script.</li>
+              <li>Choose template before search.</li>
+              <li>Review scene videos.</li>
+              <li>Edit in Studio timeline.</li>
+            </ol>
+          </aside>
+        </div>
+      </section>
 
-        <article class="step-card" data-step-card="tts">
-          <div class="step-card-head">
-            <span class="step-number">4</span>
-            <div>
-              <h2>Generate TTS Timing</h2>
-              <p>Create English voice timing so captions/text match the voiceover.</p>
+      <section class="vd-view" data-view="script">
+        <div class="vd-two-column">
+          <section class="vd-panel">
+            <div class="vd-panel-head">
+              <div>
+                <p class="vd-kicker">Script to video</p>
+                <h2>Your script</h2>
+              </div>
+              <span id="script-metrics" class="vd-chip">0 words</span>
             </div>
-            <span class="step-state" data-step-state="tts">waiting</span>
-          </div>
-          <div class="fields">
-            <label>TTS provider
-              <select id="tts-provider">
-                <option value="timing_only">timing_only</option>
-                <option value="free_tts">free_tts</option>
-              </select>
-            </label>
-            <label>Voice ID <input id="voice-id" value="en-US-AriaNeural"></label>
-          </div>
-          <button id="tts">Generate TTS timing</button>
-        </article>
-
-        <article class="step-card" data-step-card="search">
-          <div class="step-card-head">
-            <span class="step-number">5</span>
-            <div>
-              <h2>Search Douyin Materials</h2>
-              <p>Run Douyin search separately for each planned scene.</p>
+            <input id="script-idea" placeholder="Optional idea for DeepSeek">
+            <textarea id="script-editor" class="vd-script-editor" placeholder="Write or generate the video script here."></textarea>
+            <div class="vd-script-tools">
+              <label>Scene pacing
+                <select id="split-mode">
+                  <option value="normal">Normal</option>
+                  <option value="dense">Dense</option>
+                  <option value="sparse">Sparse</option>
+                  <option value="manual">Manual</option>
+                  <option value="auto">Auto</option>
+                </select>
+              </label>
+              <label>Max words per scene <input id="max-words" type="number" min="4" max="80" value="18"></label>
+              <label>Target scene seconds <input id="scene-seconds" type="number" min="1" value="4"></label>
             </div>
-            <span class="step-state" data-step-state="search">waiting</span>
-          </div>
-          <div class="fields">
-            <label>Candidates per scene <input id="candidate-count" type="number" min="1" max="10" value="4"></label>
-            <label>Queries per scene <input id="query-count" type="number" min="1" max="3" value="1"></label>
-          </div>
-          <button id="search-materials">Search materials</button>
-        </article>
-
-        <article class="step-card" data-step-card="review">
-          <div class="step-card-head">
-            <span class="step-number">6</span>
-            <div>
-              <h2>Review Scene Choices</h2>
-              <p>Approve the Douyin video you want for each scene before downloading.</p>
+            <div class="vd-button-row">
+              <button id="generate-script" type="button">Generate with DeepSeek</button>
+              <button id="save-script" type="button">Save script</button>
+              <button id="parse-scenes" class="vd-primary" type="button">Parse scenes</button>
             </div>
-            <span class="step-state" data-step-state="review">waiting</span>
-          </div>
-          <div id="review" class="review-empty">Scene candidates will appear here after material search.</div>
-        </article>
+          </section>
+          <aside id="summary-rail-script" class="vd-summary-rail"></aside>
+        </div>
+      </section>
 
-        <article class="step-card" data-step-card="download">
-          <div class="step-card-head">
-            <span class="step-number">7</span>
-            <div>
-              <h2>Download Approved Videos</h2>
-              <p>Only approved scene videos are downloaded into local material assets.</p>
+      <section class="vd-view" data-view="template">
+        <div class="vd-two-column">
+          <div class="vd-stack">
+            <section class="vd-panel">
+              <div class="vd-panel-head">
+                <div>
+                  <p class="vd-kicker">Format & template</p>
+                  <h2>Choose the visual system first.</h2>
+                </div>
+              </div>
+              <div class="vd-option-grid" data-preset-group="format">
+                <button class="vd-choice is-selected" data-preset-path="format.aspect_ratio" data-preset-value="9:16" type="button">9:16 Portrait</button>
+                <button class="vd-choice" data-preset-path="format.aspect_ratio" data-preset-value="1:1" type="button">1:1 Square</button>
+                <button class="vd-choice" data-preset-path="format.aspect_ratio" data-preset-value="16:9" type="button">16:9 Landscape</button>
+              </div>
+              <div class="vd-template-tabs">
+                <button class="is-selected" type="button">Dynamic Template</button>
+                <button type="button">Social Story</button>
+                <button type="button">Explainer</button>
+                <button type="button">Motivation</button>
+              </div>
+              <div class="vd-template-grid">
+                <button class="vd-template-card is-selected" data-template-id="dynamic_short" type="button"><span>Start fresh</span><strong>Dynamic Short</strong></button>
+                <button class="vd-template-card" data-template-id="explainer_clean" type="button"><span>Clean captions</span><strong>Explainer</strong></button>
+                <button class="vd-template-card" data-template-id="quote_motivation" type="button"><span>Large text</span><strong>Motivation</strong></button>
+              </div>
+            </section>
+
+            <section class="vd-panel">
+              <p class="vd-kicker">Scene media</p>
+              <h2>Material source</h2>
+              <div class="vd-option-grid">
+                <button class="vd-choice is-selected" data-preset-path="scene_media.media_source" data-preset-value="douyin_stock" type="button">Douyin stock</button>
+                <button class="vd-choice" data-preset-path="scene_media.media_source" data-preset-value="uploads" type="button">Uploads</button>
+                <button class="vd-choice" data-preset-path="scene_media.media_source" data-preset-value="placeholder" type="button">Placeholder</button>
+              </div>
+              <div class="vd-script-tools">
+                <label>Candidates per scene <input id="preset-candidate-count" type="number" min="1" max="10" value="4"></label>
+                <label><input id="preset-translate" type="checkbox" checked> Translate query to Chinese</label>
+              </div>
+            </section>
+
+            <section class="vd-panel">
+              <p class="vd-kicker">Voice & captions</p>
+              <h2>Caption style and voice</h2>
+              <div class="vd-script-tools">
+                <label>TTS provider
+                  <select id="tts-provider">
+                    <option value="timing_only">timing_only</option>
+                    <option value="free_tts">free_tts</option>
+                  </select>
+                </label>
+                <label>Voice ID <input id="voice-id" value="en-US-AriaNeural"></label>
+              </div>
+              <div class="vd-caption-grid">
+                <button class="is-selected" data-caption-style="bold_outline" type="button">Bold Outline</button>
+                <button data-caption-style="word" type="button">Word</button>
+                <button data-caption-style="pop_lime" type="button">Pop Lime</button>
+                <button data-caption-style="neon_glow" type="button">Neon Glow</button>
+              </div>
+            </section>
+
+            <section class="vd-panel">
+              <p class="vd-kicker">Extras</p>
+              <h2>Timeline defaults</h2>
+              <div class="vd-option-grid">
+                <button class="vd-choice is-selected" data-preset-path="extras.transition_pack_id" data-preset-value="fast_swipes" type="button">Fast swipes</button>
+                <button class="vd-choice" data-preset-path="extras.icon_pack_id" data-preset-value="arrows_shapes_basic" type="button">Arrows & shapes</button>
+                <button class="vd-choice" data-preset-path="extras.overlay_pack_id" data-preset-value="clean_shadow" type="button">Clean shadow</button>
+              </div>
+            </section>
+          </div>
+          <aside id="summary-rail-template" class="vd-summary-rail"></aside>
+        </div>
+      </section>
+
+      <section class="vd-view" data-view="plan">
+        <div class="vd-workspace">
+          <aside id="plan-scene-rail" class="vd-scene-rail"></aside>
+          <section class="vd-panel vd-scene-editor">
+            <div class="vd-panel-head">
+              <div>
+                <p class="vd-kicker">Scene plan</p>
+                <h2 id="plan-scene-title">Select a scene</h2>
+              </div>
+              <button id="generate-tts" type="button">Generate TTS timing</button>
             </div>
-            <span class="step-state" data-step-state="download">waiting</span>
-          </div>
-          <button id="download">Download approved videos</button>
-        </article>
-
-        <article class="step-card" data-step-card="studio">
-          <div class="step-card-head">
-            <span class="step-number">8</span>
-            <div>
-              <h2>Create Studio Timeline</h2>
-              <p>Build a timeline JSON from approved and downloaded scenes.</p>
+            <label>Voiceover <textarea id="scene-voiceover"></textarea></label>
+            <label>On-screen text <input id="scene-onscreen"></label>
+            <label>Visual brief <textarea id="scene-visual"></textarea></label>
+            <label>Matching keywords <input id="scene-keywords" placeholder="comma separated"></label>
+            <div class="vd-button-row">
+              <button id="save-scene" class="vd-primary" type="button">Save scene</button>
+              <button id="split-scene" type="button">Split</button>
+              <button id="merge-prev-scene" type="button">Merge previous</button>
             </div>
-            <span class="step-state" data-step-state="studio">waiting</span>
-          </div>
-          <button id="studio">Create timeline</button>
-          <div id="timeline" class="studio-empty">Timeline preview will appear after studio creation.</div>
-        </article>
-      </div>
+          </section>
+        </div>
+      </section>
 
-      <aside class="workflow-side">
-        <section class="side-panel">
-          <h2>Current Project</h2>
-          <dl class="project-facts">
-            <dt>Project</dt>
-            <dd id="project-id">Not created</dd>
-            <dt>Scenes</dt>
-            <dd id="scene-count">0</dd>
-            <dt>Approved</dt>
-            <dd id="approved-count">0</dd>
-            <dt>Downloaded</dt>
-            <dd id="downloaded-count">0</dd>
-          </dl>
-        </section>
-        <section class="side-panel">
-          <h2>Activity</h2>
-          <div id="activity-log" class="activity-log"></div>
-        </section>
-      </aside>
-    </section>
-  </main>
+      <section class="vd-view" data-view="materials">
+        <div class="vd-workspace">
+          <aside id="materials-scene-rail" class="vd-scene-rail"></aside>
+          <section class="vd-panel">
+            <div class="vd-panel-head">
+              <div>
+                <p class="vd-kicker">Material review</p>
+                <h2 id="materials-scene-title">Select a scene</h2>
+              </div>
+              <button id="download-approved" type="button">Download approved</button>
+            </div>
+            <div id="candidate-board" class="vd-candidate-board"></div>
+          </section>
+          <aside class="vd-search-panel">
+            <h3>Search this scene</h3>
+            <input id="manual-keyword" placeholder="Manual keyword">
+            <label>Candidates <input id="candidate-count" type="number" min="1" max="10" value="4"></label>
+            <label><input id="translate-query" type="checkbox" checked> Translate</label>
+            <button id="search-current-scene" class="vd-primary" type="button">Search scene</button>
+            <button id="search-all-scenes" type="button">Search all</button>
+            <div id="search-progress" class="vd-progress-log"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="vd-view" data-view="studio">
+        <div class="vd-studio-shell">
+          <aside class="vd-studio-tools">
+            <button data-studio-tool="script" class="is-selected" type="button">Script</button>
+            <button data-studio-tool="media" type="button">Media</button>
+            <button data-studio-tool="text" type="button">Text</button>
+            <button data-studio-tool="captions" type="button">Captions</button>
+            <button data-studio-tool="settings" type="button">Settings</button>
+          </aside>
+          <aside id="studio-tool-panel" class="vd-studio-panel"></aside>
+          <section class="vd-studio-stage-wrap">
+            <div class="vd-studio-actions">
+              <button id="create-timeline" class="vd-primary" type="button">Create timeline</button>
+              <button id="studio-play" type="button">Play</button>
+              <span id="studio-time">0:00</span>
+              <button type="button" disabled>Export soon</button>
+            </div>
+            <div id="studio-stage" class="vd-canvas">
+              <video id="studio-video" controls playsinline></video>
+              <div id="studio-caption" class="vd-canvas-caption"></div>
+              <div id="studio-text" class="vd-canvas-text" data-draggable-text="true"></div>
+            </div>
+          </section>
+          <section class="vd-timeline-wrap">
+            <div id="timeline-ruler" class="vd-time-ruler"></div>
+            <div id="timeline-tracks" class="vd-timeline-tracks"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
   <script src="/static/videodesign.js"></script>
 </body>
 </html>

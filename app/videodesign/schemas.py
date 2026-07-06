@@ -203,5 +203,6 @@ class MaterialsDownloadRequest(BaseModel):
 class TimelineItemPatch(BaseModel):
     start_seconds: float | None = None
     end_seconds: float | None = None
+    source_ref: dict[str, Any] | None = None
     transform: dict[str, Any] | None = None
     style: dict[str, Any] | None = None

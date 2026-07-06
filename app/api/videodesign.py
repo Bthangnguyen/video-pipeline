@@ -37,6 +37,22 @@ async def create_project(request: CreateProjectRequest):
         return error_response(error)
 
 
+@router.get("/projects/{project_id}")
+async def get_project(project_id: str):
+    try:
+        return videodesign_service.get_project(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.patch("/projects/{project_id}")
+async def update_project(project_id: str, patch: dict = Body(...)):
+    try:
+        return videodesign_service.update_project(project_id, patch)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
 @router.patch("/projects/{project_id}/preset")
 async def set_preset(project_id: str, preset: dict = Body(...)):
     try:
@@ -119,6 +135,15 @@ async def scene_audio(project_id: str, scene_id: str):
 @router.post("/projects/{project_id}/materials/search")
 async def search_materials(project_id: str, request: MaterialsSearchRequest):
     try:
+        return await videodesign_service.search_materials(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/scenes/{scene_id}/materials/search")
+async def search_scene_materials(project_id: str, scene_id: str, request: MaterialsSearchRequest):
+    try:
+        request.scene_ids = [scene_id]
         return await videodesign_service.search_materials(project_id, request)
     except VideoDesignError as error:
         return error_response(error)

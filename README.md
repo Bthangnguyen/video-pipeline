@@ -60,6 +60,8 @@ Build the video pipeline as small modules that can be developed and tested indep
 ### Video Design Module
 
 - [Video Design Module Spec](docs/modules/video-design.md)
+- [Video Design UI Redesign Spec](docs/modules/video-design-ui-redesign.md)
+- [Video Design Flow Specs](docs/modules/video-design-flows/README.md)
 
 ## Run
 
