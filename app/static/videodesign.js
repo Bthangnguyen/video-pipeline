@@ -7,6 +7,9 @@ const state = {
   selectedSceneId: "",
   selectedItemId: "",
   selectedTool: "script",
+  timelineFit: true,
+  timelinePixelsPerSecond: 48,
+  timelinePlayheadSeconds: 0,
   running: false,
   lastProgressMessage: "",
   preset: defaultPreset(),
@@ -14,6 +17,11 @@ const state = {
 
 let progressTimer = null;
 let dragState = null;
+const TIMELINE_LABEL_WIDTH = 122;
+const TIMELINE_LABEL_WIDTH_COMPACT = 96;
+const TIMELINE_MIN_CLIP_SECONDS = 0.25;
+const TIMELINE_MIN_ZOOM = 18;
+const TIMELINE_MAX_ZOOM = 140;
 
 const viewTitles = {
   start: "Create video",
@@ -88,6 +96,15 @@ function bindEvents() {
 
   document.getElementById("create-timeline").addEventListener("click", createTimeline);
   document.getElementById("studio-play").addEventListener("click", toggleStudioPlayback);
+  document.getElementById("studio-video").addEventListener("timeupdate", updateStudioClock);
+  document.getElementById("studio-video").addEventListener("loadedmetadata", updateStudioClock);
+  document.getElementById("studio-video").addEventListener("play", updateStudioPlaybackButton);
+  document.getElementById("studio-video").addEventListener("pause", updateStudioPlaybackButton);
+  document.getElementById("timeline-fit").addEventListener("click", fitTimeline);
+  document.getElementById("timeline-zoom-out").addEventListener("click", () => zoomTimeline(-1));
+  document.getElementById("timeline-zoom-in").addEventListener("click", () => zoomTimeline(1));
+  document.getElementById("timeline-ruler").addEventListener("pointerdown", seekTimelineFromPointer);
+  document.getElementById("timeline-tracks").addEventListener("pointerdown", seekTimelineFromPointer);
   document.querySelectorAll("[data-studio-tool]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedTool = button.dataset.studioTool;
@@ -216,6 +233,12 @@ async function saveSplitSettings() {
 
 async function savePreset() {
   if (!state.projectId) return;
+  state.preset.template = {
+    ...(state.preset.template || {}),
+    template_id: "short_form_editor",
+    template_category: "timeline_template",
+  };
+  state.preset.scene_media.media_source = "douyin_stock";
   state.preset.scene_media.candidate_count = Number(document.getElementById("preset-candidate-count").value || state.preset.scene_media.candidate_count);
   state.preset.scene_media.translate_to_chinese = document.getElementById("preset-translate").checked;
   state.preset.voiceover.provider = document.getElementById("tts-provider").value;
@@ -229,7 +252,7 @@ async function savePreset() {
 
 async function generateTts() {
   ensureProject();
-  await run("Generating TTS timing", async () => {
+  await run("Generating TTS audio and timing", async () => {
     await savePreset();
     await api(`/api/videodesign/projects/${state.projectId}/tts/generate`, {
       method: "POST",
@@ -239,7 +262,7 @@ async function generateTts() {
       },
     });
     await loadReview();
-    navigate("materials");
+    setStatus("TTS generated. Review timing, then continue to Materials.", "idle");
   });
 }
 
@@ -402,6 +425,7 @@ function navigate(view) {
     view = "start";
   }
   state.activeView = view;
+  document.body.dataset.vdView = view;
   document.querySelectorAll(".vd-view").forEach((section) => {
     section.dataset.active = section.dataset.view === view ? "true" : "false";
   });
@@ -414,9 +438,11 @@ function navigate(view) {
 
 function renderAll() {
   renderProjectChip();
+  renderTemplateSelections();
   renderSummaryRails();
   renderSceneRails();
   renderSceneEditor();
+  renderTtsStatus();
   renderCandidateBoard();
   renderStudio();
   updateScriptMetrics();
@@ -431,11 +457,10 @@ function renderSummaryRails() {
   const html = `
     <h3>Your video</h3>
     ${summaryRow("Format", state.preset.format.aspect_ratio)}
-    ${summaryRow("Template", templateLabel(state.preset.template.template_id))}
-    ${summaryRow("Scene media", mediaLabel(state.preset.scene_media.media_source))}
+    ${summaryRow("Text style", captionLabel(state.preset.captions.style_id))}
+    ${summaryRow("Transition", transitionLabel(state.preset.extras.transition_pack_id))}
+    ${summaryRow("Overlay", overlayLabel(state.preset.extras.overlay_pack_id))}
     ${summaryRow("Voiceover", `${state.preset.voiceover.provider} - ${state.preset.voiceover.voice_id}`)}
-    ${summaryRow("Captions", state.preset.captions.style_id.replaceAll("_", " "))}
-    ${summaryRow("Extras", state.preset.extras.transition_pack_id.replaceAll("_", " "))}
     <button class="vd-primary" data-summary-action="save-template" type="button">Save preset and continue</button>
   `;
   document.querySelectorAll(".vd-summary-rail").forEach((rail) => {
@@ -452,6 +477,16 @@ function renderSummaryRails() {
 
 function summaryRow(label, value) {
   return `<div class="vd-summary-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "Not set")}</strong></div>`;
+}
+
+function renderTemplateSelections() {
+  document.querySelectorAll("[data-preset-path]").forEach((button) => {
+    const value = getByPath(state.preset, button.dataset.presetPath);
+    button.classList.toggle("is-selected", value === button.dataset.presetValue);
+  });
+  document.querySelectorAll("[data-caption-style]").forEach((button) => {
+    button.classList.toggle("is-selected", state.preset.captions.style_id === button.dataset.captionStyle);
+  });
 }
 
 function renderSceneRails() {
@@ -484,6 +519,34 @@ function renderSceneEditor() {
   document.getElementById("scene-onscreen").value = row?.scene.on_screen_text || "";
   document.getElementById("scene-visual").value = row?.scene.visual_brief || "";
   document.getElementById("scene-keywords").value = row?.scene.matching_keywords?.join(", ") || "";
+}
+
+function renderTtsStatus() {
+  const panel = document.getElementById("tts-status-panel");
+  if (!panel) return;
+  const rows = state.rows || [];
+  const synced = rows.filter((row) => row.scene.tts?.sync_state === "synced").length;
+  panel.innerHTML = `
+    <h3>TTS status</h3>
+    <p class="vd-muted">${synced}/${rows.length} scenes have audio timing.</p>
+    <div class="vd-tts-list">
+      ${rows.length ? rows.map((row) => `
+        <button class="vd-tts-row" data-scene-id="${row.scene.scene_id}" data-active="${row.scene.scene_id === state.selectedSceneId}" type="button">
+          <span>Scene ${row.scene.order}</span>
+          <strong>${escapeHtml(row.scene.tts?.sync_state === "synced" ? "Synced" : "Pending")}</strong>
+          <em>${formatDuration(row.scene.duration_seconds || 0)} / ${escapeHtml(row.scene.tts?.provider || state.preset.voiceover.provider)}</em>
+        </button>
+      `).join("") : `<div class="vd-empty">Parse scenes before generating TTS.</div>`}
+    </div>
+    <button id="tts-continue-materials" class="vd-primary" type="button">Continue to Materials</button>
+  `;
+  panel.querySelectorAll("[data-scene-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedSceneId = button.dataset.sceneId;
+      renderAll();
+    });
+  });
+  panel.querySelector("#tts-continue-materials")?.addEventListener("click", () => navigate("materials"));
 }
 
 function renderCandidateBoard() {
@@ -530,6 +593,7 @@ function renderCandidateBoard() {
 function renderStudio() {
   renderStudioToolPanel();
   renderStudioStage();
+  renderStudioInspector();
   renderTimeline();
   document.querySelectorAll("[data-studio-tool]").forEach((button) => {
     button.dataset.active = button.dataset.studioTool === state.selectedTool ? "true" : "false";
@@ -578,6 +642,9 @@ function renderStudioStage() {
   const video = document.getElementById("studio-video");
   const captionEl = document.getElementById("studio-caption");
   const textEl = document.getElementById("studio-text");
+  const stage = document.getElementById("studio-stage");
+  const sceneLabel = document.getElementById("studio-scene-label");
+  const mediaState = document.getElementById("studio-media-state");
 
   if (media?.source_ref?.media_url && video.getAttribute("src") !== media.source_ref.media_url) {
     video.src = media.source_ref.media_url;
@@ -585,6 +652,10 @@ function renderStudioStage() {
   }
   if (!media?.source_ref?.media_url) video.removeAttribute("src");
 
+  sceneLabel.textContent = row ? `Scene ${row.scene.order}` : "No scene selected";
+  mediaState.textContent = media?.source_ref?.media_url ? "Stream ready" : "No media";
+  stage.dataset.overlay = state.preset.extras.overlay_pack_id || "caption_shadow";
+  stage.dataset.captionStyle = state.preset.captions.style_id || "bold_outline";
   const chunks = caption?.source_ref?.caption_chunks || row?.scene.caption_chunks || [];
   captionEl.textContent = chunks.map((chunk) => chunk.text).join(" ") || row?.scene.caption_text || "";
   textEl.textContent = textForItem(text) || row?.scene.on_screen_text || "";
@@ -592,25 +663,65 @@ function renderStudioStage() {
   const transform = text?.transform || { x: 50, y: 18 };
   textEl.style.left = `${Number(transform.x ?? 50)}%`;
   textEl.style.top = `${Number(transform.y ?? 18)}%`;
+  updateStudioClock();
+  updateStudioPlaybackButton();
+}
+
+function renderStudioInspector() {
+  const panel = document.getElementById("studio-inspector");
+  if (!panel) return;
+  const item = selectedItem();
+  const row = selectedRow();
+  if (!state.timeline) {
+    panel.innerHTML = `
+      <h3>Inspector</h3>
+      <p class="vd-muted">Create a timeline after approving and downloading scene videos.</p>
+    `;
+    return;
+  }
+  panel.innerHTML = `
+    <h3>Inspector</h3>
+    ${summaryRow("Scene", row ? `Scene ${row.scene.order}` : "None")}
+    ${summaryRow("Selected", item ? itemLabel(item) : "None")}
+    ${summaryRow("Start", item ? formatDuration(item.start_seconds) : "0:00")}
+    ${summaryRow("End", item ? formatDuration(item.end_seconds) : "0:00")}
+    ${summaryRow("Text style", captionLabel(state.preset.captions.style_id))}
+    ${summaryRow("Transition", transitionLabel(state.preset.extras.transition_pack_id))}
+    ${summaryRow("Overlay", overlayLabel(state.preset.extras.overlay_pack_id))}
+  `;
 }
 
 function renderTimeline() {
   const ruler = document.getElementById("timeline-ruler");
   const tracks = document.getElementById("timeline-tracks");
+  const board = document.querySelector(".vd-timeline-board");
+  const durationLabel = document.getElementById("timeline-duration-label");
+  const zoomLabel = document.getElementById("timeline-zoom-label");
   if (!state.timeline) {
     ruler.innerHTML = "";
     tracks.innerHTML = `<div class="vd-empty">Create a Studio timeline after videos are downloaded.</div>`;
+    if (durationLabel) durationLabel.textContent = "0:00";
+    if (zoomLabel) zoomLabel.textContent = "Fit";
+    updateTimelinePlayhead(0);
+    updateTimelineZoomButtons();
     return;
   }
   const duration = Math.max(1, state.timeline.duration_seconds || 1);
-  ruler.innerHTML = [0, 25, 50, 75, 100].map((tick) => `<span style="left:${tick}%">${Math.round(duration * tick / 100)}s</span>`).join("");
+  const metrics = timelineMetrics(duration);
+  if (board) {
+    board.style.setProperty("--timeline-label-width", `${metrics.labelWidth}px`);
+    board.style.setProperty("--timeline-lane-width", `${metrics.laneWidth}px`);
+  }
+  if (durationLabel) durationLabel.textContent = formatDuration(duration);
+  if (zoomLabel) zoomLabel.textContent = state.timelineFit ? "Fit" : `${Math.round(metrics.pxPerSecond)} px/s`;
+  ruler.innerHTML = timelineTicks(duration, metrics).map((tick) => `<span style="left:${tick.left}px">${formatDuration(tick.time)}</span>`).join("");
   tracks.innerHTML = state.timeline.layers.map((layer) => {
     const items = state.timeline.items.filter((item) => item.layer_id === layer);
     return `
       <div class="vd-track">
         <div class="vd-track-name">${escapeHtml(layer.replaceAll("_", " "))}</div>
         <div class="vd-track-lane" data-track-layer="${layer}">
-          ${items.map((item) => timelineClip(item, duration)).join("")}
+          ${items.map((item) => timelineClip(item, metrics)).join("")}
         </div>
       </div>
     `;
@@ -627,19 +738,152 @@ function renderTimeline() {
     });
     clip.addEventListener("pointerdown", startTimelineDrag);
   });
+  updateTimelineZoomButtons();
+  updateStudioClock();
 }
 
-function timelineClip(item, duration) {
-  const left = Math.max(0, Math.min(100, (item.start_seconds / duration) * 100));
-  const width = Math.max(2, Math.min(100 - left, ((item.end_seconds - item.start_seconds) / duration) * 100));
+function timelineClip(item, metrics) {
+  const left = Math.max(0, item.start_seconds * metrics.pxPerSecond);
+  const width = Math.max(12, (item.end_seconds - item.start_seconds) * metrics.pxPerSecond);
   const active = item.item_id === state.selectedItemId ? "true" : "false";
+  const editable = editableTimelineItem(item) ? "true" : "false";
   return `
-    <button class="vd-timeline-clip" data-item-id="${item.item_id}" data-type="${item.type}" data-active="${active}" style="left:${left}%;width:${width}%;" type="button">
+    <button class="vd-timeline-clip" data-item-id="${item.item_id}" data-type="${item.type}" data-active="${active}" data-editable="${editable}" style="left:${left}px;width:${width}px;" type="button">
       <span class="vd-resize-handle" data-edge="left"></span>
-      ${escapeHtml(item.type)}
+      <strong>${escapeHtml(itemLabel(item))}</strong>
       <span class="vd-resize-handle" data-edge="right"></span>
     </button>
   `;
+}
+
+function timelineMetrics(duration = Math.max(1, state.timeline?.duration_seconds || 1)) {
+  const board = document.querySelector(".vd-timeline-board");
+  const labelWidth = window.matchMedia("(max-width: 1120px)").matches ? TIMELINE_LABEL_WIDTH_COMPACT : TIMELINE_LABEL_WIDTH;
+  const boardWidth = board?.clientWidth || 900;
+  const fitLaneWidth = Math.max(320, boardWidth - labelWidth);
+  const zoomLaneWidth = Math.max(320, duration * state.timelinePixelsPerSecond);
+  const laneWidth = state.timelineFit ? fitLaneWidth : Math.max(fitLaneWidth, zoomLaneWidth);
+  return {
+    duration,
+    labelWidth,
+    laneWidth,
+    pxPerSecond: laneWidth / duration,
+  };
+}
+
+function timelineTicks(duration, metrics) {
+  const targetPixels = 110;
+  const rawStep = Math.max(0.5, targetPixels / metrics.pxPerSecond);
+  const step = niceTimelineStep(rawStep);
+  const ticks = [];
+  for (let time = 0; time <= duration + 0.001; time += step) {
+    ticks.push({ time: Math.min(duration, Number(time.toFixed(2))), left: time * metrics.pxPerSecond });
+  }
+  if (!ticks.length || ticks.at(-1).time < duration) {
+    ticks.push({ time: duration, left: duration * metrics.pxPerSecond });
+  }
+  return ticks;
+}
+
+function niceTimelineStep(rawStep) {
+  const steps = [0.5, 1, 2, 5, 10, 15, 30, 60];
+  return steps.find((step) => step >= rawStep) || 120;
+}
+
+function editableTimelineItem(item) {
+  return ["media", "text", "caption", "overlay"].includes(item?.type);
+}
+
+function fitTimeline() {
+  state.timelineFit = true;
+  renderTimeline();
+}
+
+function zoomTimeline(direction) {
+  state.timelineFit = false;
+  const factor = direction > 0 ? 1.25 : 0.8;
+  state.timelinePixelsPerSecond = clamp(state.timelinePixelsPerSecond * factor, TIMELINE_MIN_ZOOM, TIMELINE_MAX_ZOOM);
+  renderTimeline();
+}
+
+function updateTimelineZoomButtons() {
+  const fit = document.getElementById("timeline-fit");
+  const zoomOut = document.getElementById("timeline-zoom-out");
+  const zoomIn = document.getElementById("timeline-zoom-in");
+  if (fit) fit.dataset.active = state.timelineFit ? "true" : "false";
+  if (zoomOut) zoomOut.disabled = !state.timeline || (!state.timelineFit && state.timelinePixelsPerSecond <= TIMELINE_MIN_ZOOM);
+  if (zoomIn) zoomIn.disabled = !state.timeline || (!state.timelineFit && state.timelinePixelsPerSecond >= TIMELINE_MAX_ZOOM);
+}
+
+function seekTimelineFromPointer(event) {
+  if (!state.timeline || event.button !== 0 || event.target.closest("[data-item-id]")) return;
+  const fromRuler = event.currentTarget?.id === "timeline-ruler";
+  if (!fromRuler && !event.target.closest(".vd-track-lane")) return;
+  const board = document.querySelector(".vd-timeline-board");
+  if (!board) return;
+  const metrics = timelineMetrics();
+  const rect = board.getBoundingClientRect();
+  const x = event.clientX - rect.left + board.scrollLeft - metrics.labelWidth;
+  seekTimeline(clamp(x / metrics.pxPerSecond, 0, metrics.duration));
+}
+
+function seekTimeline(globalTime) {
+  if (!state.timeline) return;
+  const duration = Math.max(1, state.timeline.duration_seconds || 1);
+  const time = clamp(Number(globalTime || 0), 0, duration);
+  state.timelinePlayheadSeconds = time;
+  const media = mediaItemAtTime(time);
+  if (media) {
+    state.selectedSceneId = media.scene_id;
+    if (!selectedItem() || selectedItem()?.scene_id !== media.scene_id) {
+      state.selectedItemId = media.item_id;
+    }
+    renderStudio();
+    syncStudioVideoToTimeline(time);
+    return;
+  }
+  updateStudioClock(time);
+}
+
+function mediaItemAtTime(time) {
+  const mediaItems = timelineItems().filter((item) => item.type === "media");
+  return mediaItems.find((item) => time >= item.start_seconds && time <= item.end_seconds)
+    || mediaItems.find((item) => time < item.start_seconds)
+    || mediaItems.at(-1)
+    || null;
+}
+
+function syncStudioVideoToTimeline(globalTime) {
+  const video = document.getElementById("studio-video");
+  const media = timelineItems().find((item) => item.type === "media" && item.scene_id === selectedRow()?.scene.scene_id);
+  if (!video || !media) return;
+  const localTime = clamp(globalTime - media.start_seconds, 0, Math.max(0, media.end_seconds - media.start_seconds));
+  const setTime = () => {
+    try {
+      video.currentTime = localTime;
+    } catch {
+      return;
+    }
+    updateStudioClock();
+  };
+  if (video.readyState > 0) setTime();
+  else video.addEventListener("loadedmetadata", setTime, { once: true });
+}
+
+function placeTimelineClip(clip, item) {
+  if (!clip || !item) return;
+  const metrics = timelineMetrics();
+  clip.style.left = `${Math.max(0, item.start_seconds * metrics.pxPerSecond)}px`;
+  clip.style.width = `${Math.max(12, (item.end_seconds - item.start_seconds) * metrics.pxPerSecond)}px`;
+}
+
+function updateTimelineClipActiveStates() {
+  document.querySelectorAll(".vd-timeline-clip").forEach((clip) => {
+    clip.dataset.active = clip.dataset.itemId === state.selectedItemId ? "true" : "false";
+  });
+  document.querySelectorAll("[data-studio-tool]").forEach((button) => {
+    button.dataset.active = button.dataset.studioTool === state.selectedTool ? "true" : "false";
+  });
 }
 
 async function saveStudioText() {
@@ -663,19 +907,32 @@ function startCanvasTextDrag(event) {
 
 function startTimelineDrag(event) {
   const item = state.timeline?.items.find((entry) => entry.item_id === event.currentTarget.dataset.itemId);
-  if (!item || !["text", "media"].includes(item.type)) return;
+  if (!item || !editableTimelineItem(item)) return;
   event.preventDefault();
+  event.stopPropagation();
   const lane = event.currentTarget.closest(".vd-track-lane");
+  const metrics = timelineMetrics();
+  state.selectedItemId = item.item_id;
+  state.selectedSceneId = item.scene_id;
+  if (item.type === "text") state.selectedTool = "text";
+  updateTimelineClipActiveStates();
+  renderStudioToolPanel();
+  renderStudioStage();
+  renderStudioInspector();
   dragState = {
     kind: "timeline",
     itemId: item.item_id,
     edge: event.target.dataset.edge || "move",
     startX: event.clientX,
+    clipEl: event.currentTarget,
     laneWidth: lane.getBoundingClientRect().width,
-    timelineDuration: Math.max(1, state.timeline.duration_seconds || 1),
+    timelineDuration: metrics.duration,
+    pxPerSecond: metrics.pxPerSecond,
     originalStart: item.start_seconds,
     originalEnd: item.end_seconds,
+    moved: false,
   };
+  event.currentTarget.dataset.dragging = "true";
 }
 
 function onPointerMove(event) {
@@ -691,28 +948,35 @@ function onPointerMove(event) {
   if (dragState.kind === "timeline") {
     const item = state.timeline.items.find((entry) => entry.item_id === dragState.itemId);
     if (!item) return;
-    const deltaSeconds = ((event.clientX - dragState.startX) / dragState.laneWidth) * dragState.timelineDuration;
-    const snap = (value) => Math.round(value * 10) / 10;
+    const deltaSeconds = (event.clientX - dragState.startX) / dragState.pxPerSecond;
+    const maxDuration = Math.max(1, state.timeline.duration_seconds || 1);
+    const snap = (value) => Math.round(value * 20) / 20;
+    dragState.moved = dragState.moved || Math.abs(event.clientX - dragState.startX) > 2;
     if (dragState.edge === "left") {
-      item.start_seconds = snap(clamp(dragState.originalStart + deltaSeconds, 0, item.end_seconds - 0.5));
+      item.start_seconds = snap(clamp(dragState.originalStart + deltaSeconds, 0, item.end_seconds - TIMELINE_MIN_CLIP_SECONDS));
     } else if (dragState.edge === "right") {
-      item.end_seconds = snap(Math.max(item.start_seconds + 0.5, dragState.originalEnd + deltaSeconds));
+      item.end_seconds = snap(clamp(dragState.originalEnd + deltaSeconds, item.start_seconds + TIMELINE_MIN_CLIP_SECONDS, maxDuration));
     } else {
       const duration = dragState.originalEnd - dragState.originalStart;
-      const nextStart = snap(Math.max(0, dragState.originalStart + deltaSeconds));
+      const nextStart = snap(clamp(dragState.originalStart + deltaSeconds, 0, Math.max(0, maxDuration - duration)));
       item.start_seconds = nextStart;
-      item.end_seconds = snap(nextStart + duration);
+      item.end_seconds = snap(Math.min(maxDuration, nextStart + duration));
     }
-    renderTimeline();
+    placeTimelineClip(dragState.clipEl, item);
+    renderStudioInspector();
+    updateTimelinePlayhead(state.timelinePlayheadSeconds);
   }
 }
 
 async function endPointerDrag() {
   if (!dragState) return;
   const item = state.timeline?.items.find((entry) => entry.item_id === dragState.itemId);
+  const shouldPatch = dragState.kind !== "timeline" || dragState.moved;
+  const clipEl = dragState.clipEl;
   const patch = item ? { start_seconds: item.start_seconds, end_seconds: item.end_seconds, transform: item.transform } : null;
   dragState = null;
-  if (item && patch) await patchTimelineItem(item.item_id, patch);
+  if (clipEl) clipEl.dataset.dragging = "false";
+  if (item && patch && shouldPatch) await patchTimelineItem(item.item_id, patch);
 }
 
 async function patchTimelineItem(itemId, patch) {
@@ -745,6 +1009,7 @@ function setCaptionStyle(button) {
   document.querySelectorAll("[data-caption-style]").forEach((item) => item.classList.remove("is-selected"));
   button.classList.add("is-selected");
   state.preset.captions.style_id = button.dataset.captionStyle;
+  state.preset.captions.animation_id = button.dataset.captionStyle;
   renderSummaryRails();
 }
 
@@ -812,7 +1077,7 @@ function hydrateProjectFields(updateInputs = true) {
     document.getElementById("max-words").value = state.project.split_settings.max_words_per_scene || 18;
     document.getElementById("scene-seconds").value = state.project.split_settings.target_scene_duration_seconds || 4;
   }
-  document.getElementById("tts-provider").value = state.preset.voiceover.provider || "timing_only";
+  document.getElementById("tts-provider").value = state.preset.voiceover.provider || "free_tts";
   document.getElementById("voice-id").value = state.preset.voiceover.voice_id || "en-US-AriaNeural";
   document.getElementById("preset-candidate-count").value = state.preset.scene_media.candidate_count || 4;
   document.getElementById("preset-translate").checked = Boolean(state.preset.scene_media.translate_to_chinese);
@@ -860,6 +1125,34 @@ function toggleStudioPlayback() {
   else video.pause();
 }
 
+function updateStudioClock(forcedGlobalTime = null) {
+  const video = document.getElementById("studio-video");
+  const media = timelineItems().find((item) => item.type === "media" && item.scene_id === selectedRow()?.scene.scene_id);
+  const hasForcedTime = typeof forcedGlobalTime === "number" && Number.isFinite(forcedGlobalTime);
+  const localTime = Number(video?.currentTime || 0);
+  const globalTime = hasForcedTime ? forcedGlobalTime : (media?.start_seconds || 0) + localTime;
+  state.timelinePlayheadSeconds = clamp(globalTime, 0, Math.max(1, state.timeline?.duration_seconds || 1));
+  const time = document.getElementById("studio-time");
+  if (time) time.textContent = state.timeline ? `${formatDuration(state.timelinePlayheadSeconds)} / ${formatDuration(state.timeline.duration_seconds)}` : "0:00";
+  updateTimelinePlayhead(state.timelinePlayheadSeconds);
+}
+
+function updateTimelinePlayhead(globalTime) {
+  const playhead = document.getElementById("timeline-playhead");
+  if (!playhead) return;
+  const duration = Math.max(1, state.timeline?.duration_seconds || 1);
+  const metrics = timelineMetrics(duration);
+  const left = metrics.labelWidth + clamp(Number(globalTime || 0), 0, duration) * metrics.pxPerSecond;
+  playhead.style.left = `${left}px`;
+}
+
+function updateStudioPlaybackButton() {
+  const video = document.getElementById("studio-video");
+  const button = document.getElementById("studio-play");
+  if (!button || !video) return;
+  button.textContent = video.paused ? "Play" : "Pause";
+}
+
 function ensureProject() {
   if (!state.projectId) throw new Error("Create or load a project first.");
 }
@@ -873,11 +1166,11 @@ function setStatus(message, mode) {
 function defaultPreset() {
   return {
     format: { aspect_ratio: "9:16", platform: "tiktok", target_duration_seconds: 45 },
-    template: { template_id: "dynamic_short", template_category: "dynamic_template", scene_pacing: "normal" },
+    template: { template_id: "short_form_editor", template_category: "timeline_template", scene_pacing: "normal" },
     scene_media: { media_source: "douyin_stock", candidate_count: 4, translate_to_chinese: true },
-    voiceover: { provider: "timing_only", voice_id: "en-US-AriaNeural", language: "en" },
+    voiceover: { provider: "free_tts", voice_id: "en-US-AriaNeural", language: "en" },
     captions: { enabled: true, style_id: "bold_outline", position: "bottom_safe", animation_id: "word_reveal" },
-    extras: { transition_pack_id: "fast_swipes", overlay_pack_id: "clean_shadow", icon_pack_id: "arrows_shapes_basic" },
+    extras: { transition_pack_id: "clean_cut", overlay_pack_id: "caption_shadow", icon_pack_id: "none" },
   };
 }
 
@@ -903,12 +1196,54 @@ function setByPath(target, path, value) {
   cursor[parts.at(-1)] = value;
 }
 
+function getByPath(target, path) {
+  return path.split(".").reduce((cursor, part) => cursor?.[part], target);
+}
+
 function templateLabel(value) {
   return {
-    dynamic_short: "Dynamic Short",
-    explainer_clean: "Explainer",
-    quote_motivation: "Motivation",
+    short_form_editor: "Short-form editor",
+    dynamic_short: "Legacy dynamic short",
+    explainer_clean: "Legacy explainer",
+    quote_motivation: "Legacy motivation",
   }[value] || value;
+}
+
+function captionLabel(value) {
+  return {
+    bold_outline: "Bold outline",
+    word_reveal: "Word reveal",
+    clean_lower: "Clean lower third",
+  }[value] || String(value || "").replaceAll("_", " ");
+}
+
+function transitionLabel(value) {
+  return {
+    clean_cut: "Clean cut",
+    push_slide: "Push slide",
+    speed_zoom: "Speed zoom",
+    fast_swipes: "Legacy fast swipes",
+  }[value] || String(value || "").replaceAll("_", " ");
+}
+
+function overlayLabel(value) {
+  return {
+    caption_shadow: "Caption shadow",
+    focus_frame: "Focus frame",
+    soft_vignette: "Soft vignette",
+    clean_shadow: "Legacy clean shadow",
+  }[value] || String(value || "").replaceAll("_", " ");
+}
+
+function itemLabel(item) {
+  if (!item) return "";
+  return {
+    media: "Video",
+    caption: "Captions",
+    text: "Text",
+    audio: "Voice",
+    transition: "Transition",
+  }[item.type] || titleCase(item.type);
 }
 
 function mediaLabel(value) {

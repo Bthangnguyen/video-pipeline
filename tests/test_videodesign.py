@@ -230,6 +230,8 @@ def test_videodesign_review_download_and_timeline(monkeypatch):
     timeline = studio_response.json()["timeline"]
     assert timeline["items"][0]["source_ref"]["source"] == "material_asset"
     assert timeline["items"][0]["source_ref"]["media_url"].startswith(f"/api/videodesign/projects/{project_id}/materials/")
+    assert "overlay_default" in timeline["layers"]
+    assert any(item["type"] == "overlay" for item in timeline["items"])
 
     text_item = next(item for item in timeline["items"] if item["type"] == "text")
     patch_response = client.patch(

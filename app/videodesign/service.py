@@ -338,14 +338,17 @@ class VideoDesignService:
         project = self.store.get(project_id)
         items: list[TimelineItem] = []
         current = 0.0
-        for scene in project.scenes:
+        renderable_scenes = [scene for scene in project.scenes if scene.approval_state != "placeholder_allowed"]
+        for index, scene in enumerate(renderable_scenes):
             if scene.approval_state == "placeholder_allowed":
                 continue
             if not scene.material_asset_id:
                 raise VideoDesignError(SCENE_NOT_READY, f"Scene {scene.scene_id} must be downloaded before studio.")
             duration = scene.duration_seconds or estimate_duration(scene.voiceover_text)
             end = round(current + duration, 2)
-            items.extend(_timeline_items_for_scene(project.project_id, scene, current, end))
+            items.extend(_timeline_items_for_scene(project.project_id, scene, current, end, project.design_preset))
+            if index < len(renderable_scenes) - 1:
+                items.append(_transition_item_for_scene(scene, end, project.design_preset))
             current = end
         timeline = TimelineDraft(
             timeline_id=f"tln_{uuid.uuid4().hex}",
@@ -353,7 +356,7 @@ class VideoDesignService:
             duration_seconds=round(current, 2),
             aspect_ratio=project.aspect_ratio,
             scenes=[scene.scene_id for scene in project.scenes],
-            layers=["media_base", "voiceover_audio", "caption_default", "text_overlay", "transition_out"],
+            layers=["media_base", "voiceover_audio", "caption_default", "text_overlay", "overlay_default", "transition_out"],
             items=items,
         )
         project.timeline = timeline
@@ -479,8 +482,10 @@ def _score_candidate(scene: ScenePlan, title: str, duration: float) -> float:
     return round(min(1.0, 0.55 + keyword_hits * 0.08) * duration_fit, 2)
 
 
-def _timeline_items_for_scene(project_id: str, scene: ScenePlan, start: float, end: float) -> list[TimelineItem]:
+def _timeline_items_for_scene(project_id: str, scene: ScenePlan, start: float, end: float, preset: dict | None = None) -> list[TimelineItem]:
     duration = end - start
+    extras = (preset or {}).get("extras", {})
+    overlay_pack_id = extras.get("overlay_pack_id") or "caption_shadow"
     items = [
         TimelineItem(
             item_id=f"itm_{uuid.uuid4().hex}",
@@ -517,6 +522,19 @@ def _timeline_items_for_scene(project_id: str, scene: ScenePlan, start: float, e
             transform={"x": 50, "y": 18, "scale": 1, "rotation": 0},
         ),
     ]
+    if overlay_pack_id != "none":
+        items.append(
+            TimelineItem(
+                item_id=f"itm_{uuid.uuid4().hex}",
+                layer_id="overlay_default",
+                scene_id=scene.scene_id,
+                type="overlay",
+                start_seconds=start,
+                end_seconds=end,
+                source_ref={"overlay_pack_id": overlay_pack_id},
+                style={"overlay_pack_id": overlay_pack_id},
+            )
+        )
     if scene.tts.audio_url:
         items.append(
             TimelineItem(
@@ -530,6 +548,22 @@ def _timeline_items_for_scene(project_id: str, scene: ScenePlan, start: float, e
             )
         )
     return items
+
+
+def _transition_item_for_scene(scene: ScenePlan, scene_end: float, preset: dict | None = None) -> TimelineItem:
+    extras = (preset or {}).get("extras", {})
+    transition_pack_id = extras.get("transition_pack_id") or "clean_cut"
+    start = round(max(0, scene_end - 0.35), 2)
+    return TimelineItem(
+        item_id=f"itm_{uuid.uuid4().hex}",
+        layer_id="transition_out",
+        scene_id=scene.scene_id,
+        type="transition",
+        start_seconds=start,
+        end_seconds=round(scene_end, 2),
+        source_ref={"transition_pack_id": transition_pack_id},
+        style={"transition_pack_id": transition_pack_id},
+    )
 
 
 def _scenes_from_deepseek(items: list, split_settings: SplitSettings) -> list[ScenePlan]:

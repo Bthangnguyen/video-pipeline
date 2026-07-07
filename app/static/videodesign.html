@@ -113,8 +113,8 @@
             <section class="vd-panel">
               <div class="vd-panel-head">
                 <div>
-                  <p class="vd-kicker">Format & template</p>
-                  <h2>Choose the visual system first.</h2>
+                  <p class="vd-kicker">Format</p>
+                  <h2>Choose the output frame.</h2>
                 </div>
               </div>
               <div class="vd-option-grid" data-preset-group="format">
@@ -122,27 +122,63 @@
                 <button class="vd-choice" data-preset-path="format.aspect_ratio" data-preset-value="1:1" type="button">1:1 Square</button>
                 <button class="vd-choice" data-preset-path="format.aspect_ratio" data-preset-value="16:9" type="button">16:9 Landscape</button>
               </div>
-              <div class="vd-template-tabs">
-                <button class="is-selected" type="button">Dynamic Template</button>
-                <button type="button">Social Story</button>
-                <button type="button">Explainer</button>
-                <button type="button">Motivation</button>
-              </div>
-              <div class="vd-template-grid">
-                <button class="vd-template-card is-selected" data-template-id="dynamic_short" type="button"><span>Start fresh</span><strong>Dynamic Short</strong></button>
-                <button class="vd-template-card" data-template-id="explainer_clean" type="button"><span>Clean captions</span><strong>Explainer</strong></button>
-                <button class="vd-template-card" data-template-id="quote_motivation" type="button"><span>Large text</span><strong>Motivation</strong></button>
+            </section>
+
+            <section class="vd-panel">
+              <p class="vd-kicker">Text template</p>
+              <h2>Pick how words appear on the video.</h2>
+              <div class="vd-text-style-grid">
+                <button class="vd-text-style-option is-selected" data-caption-style="bold_outline" type="button">
+                  <span class="vd-text-preview vd-text-preview-bold">Big Cat Energy</span>
+                  <small>Bold outline</small>
+                </button>
+                <button class="vd-text-style-option" data-caption-style="word_reveal" type="button">
+                  <span class="vd-text-preview vd-text-preview-word">word by word</span>
+                  <small>Word reveal</small>
+                </button>
+                <button class="vd-text-style-option" data-caption-style="clean_lower" type="button">
+                  <span class="vd-text-preview vd-text-preview-clean">Clean lower third</span>
+                  <small>Lower third</small>
+                </button>
               </div>
             </section>
 
             <section class="vd-panel">
-              <p class="vd-kicker">Scene media</p>
-              <h2>Material source</h2>
+              <p class="vd-kicker">Motion template</p>
+              <h2>Transitions and overlays</h2>
               <div class="vd-option-grid">
-                <button class="vd-choice is-selected" data-preset-path="scene_media.media_source" data-preset-value="douyin_stock" type="button">Douyin stock</button>
-                <button class="vd-choice" data-preset-path="scene_media.media_source" data-preset-value="uploads" type="button">Uploads</button>
-                <button class="vd-choice" data-preset-path="scene_media.media_source" data-preset-value="placeholder" type="button">Placeholder</button>
+                <button class="vd-choice is-selected" data-preset-path="extras.transition_pack_id" data-preset-value="clean_cut" type="button">
+                  <strong>Clean cut</strong>
+                  <span>Fast and stable between scenes</span>
+                </button>
+                <button class="vd-choice" data-preset-path="extras.transition_pack_id" data-preset-value="push_slide" type="button">
+                  <strong>Push slide</strong>
+                  <span>Short social swipe motion</span>
+                </button>
+                <button class="vd-choice" data-preset-path="extras.transition_pack_id" data-preset-value="speed_zoom" type="button">
+                  <strong>Speed zoom</strong>
+                  <span>Quick punch-in on scene changes</span>
+                </button>
               </div>
+              <div class="vd-overlay-grid">
+                <button class="vd-overlay-option is-selected" data-preset-path="extras.overlay_pack_id" data-preset-value="caption_shadow" type="button">
+                  <span class="vd-overlay-preview vd-overlay-shadow"></span>
+                  <strong>Caption shadow</strong>
+                </button>
+                <button class="vd-overlay-option" data-preset-path="extras.overlay_pack_id" data-preset-value="focus_frame" type="button">
+                  <span class="vd-overlay-preview vd-overlay-frame"></span>
+                  <strong>Focus frame</strong>
+                </button>
+                <button class="vd-overlay-option" data-preset-path="extras.overlay_pack_id" data-preset-value="soft_vignette" type="button">
+                  <span class="vd-overlay-preview vd-overlay-vignette"></span>
+                  <strong>Soft vignette</strong>
+                </button>
+              </div>
+            </section>
+
+            <section class="vd-panel">
+              <p class="vd-kicker">Douyin search</p>
+              <h2>Material search settings</h2>
               <div class="vd-script-tools">
                 <label>Candidates per scene <input id="preset-candidate-count" type="number" min="1" max="10" value="4"></label>
                 <label><input id="preset-translate" type="checkbox" checked> Translate query to Chinese</label>
@@ -150,32 +186,16 @@
             </section>
 
             <section class="vd-panel">
-              <p class="vd-kicker">Voice & captions</p>
-              <h2>Caption style and voice</h2>
+              <p class="vd-kicker">Voice</p>
+              <h2>TTS and caption timing</h2>
               <div class="vd-script-tools">
                 <label>TTS provider
                   <select id="tts-provider">
-                    <option value="timing_only">timing_only</option>
                     <option value="free_tts">free_tts</option>
+                    <option value="timing_only">timing_only</option>
                   </select>
                 </label>
                 <label>Voice ID <input id="voice-id" value="en-US-AriaNeural"></label>
-              </div>
-              <div class="vd-caption-grid">
-                <button class="is-selected" data-caption-style="bold_outline" type="button">Bold Outline</button>
-                <button data-caption-style="word" type="button">Word</button>
-                <button data-caption-style="pop_lime" type="button">Pop Lime</button>
-                <button data-caption-style="neon_glow" type="button">Neon Glow</button>
-              </div>
-            </section>
-
-            <section class="vd-panel">
-              <p class="vd-kicker">Extras</p>
-              <h2>Timeline defaults</h2>
-              <div class="vd-option-grid">
-                <button class="vd-choice is-selected" data-preset-path="extras.transition_pack_id" data-preset-value="fast_swipes" type="button">Fast swipes</button>
-                <button class="vd-choice" data-preset-path="extras.icon_pack_id" data-preset-value="arrows_shapes_basic" type="button">Arrows & shapes</button>
-                <button class="vd-choice" data-preset-path="extras.overlay_pack_id" data-preset-value="clean_shadow" type="button">Clean shadow</button>
               </div>
             </section>
           </div>
@@ -204,6 +224,7 @@
               <button id="merge-prev-scene" type="button">Merge previous</button>
             </div>
           </section>
+          <aside id="tts-status-panel" class="vd-search-panel"></aside>
         </div>
       </section>
 
@@ -233,31 +254,61 @@
       </section>
 
       <section class="vd-view" data-view="studio">
-        <div class="vd-studio-shell">
-          <aside class="vd-studio-tools">
-            <button data-studio-tool="script" class="is-selected" type="button">Script</button>
-            <button data-studio-tool="media" type="button">Media</button>
-            <button data-studio-tool="text" type="button">Text</button>
-            <button data-studio-tool="captions" type="button">Captions</button>
-            <button data-studio-tool="settings" type="button">Settings</button>
-          </aside>
-          <aside id="studio-tool-panel" class="vd-studio-panel"></aside>
-          <section class="vd-studio-stage-wrap">
+        <div class="vd-studio-pro">
+          <header class="vd-studio-pro-head">
+            <div>
+              <p class="vd-kicker">Studio</p>
+              <h2>Preview and edit the video timeline.</h2>
+            </div>
             <div class="vd-studio-actions">
               <button id="create-timeline" class="vd-primary" type="button">Create timeline</button>
-              <button id="studio-play" type="button">Play</button>
-              <span id="studio-time">0:00</span>
+              <button id="studio-play" class="vd-play-button" type="button">Play</button>
+              <span id="studio-time" class="vd-timecode">0:00</span>
               <button type="button" disabled>Export soon</button>
             </div>
-            <div id="studio-stage" class="vd-canvas">
-              <video id="studio-video" controls playsinline></video>
-              <div id="studio-caption" class="vd-canvas-caption"></div>
-              <div id="studio-text" class="vd-canvas-text" data-draggable-text="true"></div>
-            </div>
-          </section>
+          </header>
+
+          <div class="vd-studio-pro-body">
+            <aside class="vd-studio-tools">
+              <button data-studio-tool="script" type="button">Script</button>
+              <button data-studio-tool="media" type="button">Media</button>
+              <button data-studio-tool="text" type="button">Text</button>
+              <button data-studio-tool="captions" type="button">Captions</button>
+              <button data-studio-tool="settings" type="button">Settings</button>
+            </aside>
+            <aside id="studio-tool-panel" class="vd-studio-panel"></aside>
+            <section class="vd-studio-stage-wrap">
+              <div class="vd-preview-toolbar">
+                <span id="studio-scene-label">No scene selected</span>
+                <span id="studio-media-state">No media</span>
+              </div>
+              <div id="studio-stage" class="vd-canvas">
+                <video id="studio-video" playsinline></video>
+                <div id="studio-caption" class="vd-canvas-caption"></div>
+                <div id="studio-text" class="vd-canvas-text" data-draggable-text="true"></div>
+              </div>
+            </section>
+            <aside id="studio-inspector" class="vd-studio-inspector"></aside>
+          </div>
+
           <section class="vd-timeline-wrap">
-            <div id="timeline-ruler" class="vd-time-ruler"></div>
-            <div id="timeline-tracks" class="vd-timeline-tracks"></div>
+            <div class="vd-timeline-toolbar">
+              <div>
+                <strong>Timeline</strong>
+                <span id="timeline-duration-label">0:00</span>
+                <span id="timeline-zoom-label">Fit</span>
+              </div>
+              <div class="vd-timeline-tools">
+                <button id="timeline-fit" type="button">Fit</button>
+                <button id="timeline-zoom-out" type="button">-</button>
+                <button id="timeline-zoom-in" type="button">+</button>
+              </div>
+            </div>
+            <div class="vd-timeline-board">
+              <div id="timeline-ruler" class="vd-time-ruler"></div>
+              <div id="timeline-playhead" class="vd-playhead"></div>
+              <div id="timeline-tracks" class="vd-timeline-tracks"></div>
+            </div>
           </section>
         </div>
       </section>
