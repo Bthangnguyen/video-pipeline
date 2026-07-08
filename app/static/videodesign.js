@@ -562,8 +562,12 @@ async function createTimeline() {
   await run("Creating Studio timeline", async () => {
     const data = await api(`/api/videodesign/projects/${state.projectId}/studio`, { method: "POST" });
     state.timeline = data.timeline;
-    const firstText = state.timeline.items.find((item) => item.type === "text");
-    state.selectedItemId = firstText?.item_id || state.timeline.items[0]?.item_id || "";
+    const firstMedia = state.timeline.items.find((item) => item.type === "media");
+    state.selectedItemId = firstMedia?.item_id || state.timeline.items[0]?.item_id || "";
+    if (firstMedia) {
+      state.selectedSceneId = firstMedia.scene_id;
+      state.selectedTool = "media";
+    }
     renderStudio();
   });
 }
@@ -1111,7 +1115,7 @@ function bindStudioMediaPanel(panel, media, row) {
       }
     }
   };
-  trimVideo?.addEventListener("loadedmetadata", () => sync(mediaTrimStart(media), false));
+  trimVideo?.addEventListener("loadedmetadata", () => sync(mediaTrimStart(media), true));
   range?.addEventListener("input", () => sync(Number(range.value || 0)));
   number?.addEventListener("change", () => sync(Number(number.value || 0)));
   panel.querySelector("#preview-trim-segment")?.addEventListener("click", () => playTrimSegment(panel, media, row));
@@ -1125,7 +1129,7 @@ function bindStudioMediaPanel(panel, media, row) {
   panel.querySelectorAll("#trim-flip-horizontal, #trim-contrast, #trim-brightness, #trim-saturation").forEach((input) => {
     input.addEventListener("input", () => applyTrimDraftToStage(panel));
   });
-  sync(mediaTrimStart(media), false);
+  sync(mediaTrimStart(media), true);
   applyTrimDraftToStage(panel);
 }
 
@@ -1373,7 +1377,8 @@ function renderTimeline() {
       state.selectedItemId = clip.dataset.itemId;
       const item = selectedItem();
       if (item) state.selectedSceneId = item.scene_id;
-      if (item?.type === "text") state.selectedTool = "text";
+      const tool = studioToolForItem(item);
+      if (tool) state.selectedTool = tool;
       renderStudio();
     });
     clip.addEventListener("pointerdown", startTimelineDrag);
@@ -1678,7 +1683,8 @@ function startTimelineDrag(event) {
   const metrics = timelineMetrics();
   state.selectedItemId = item.item_id;
   state.selectedSceneId = item.scene_id;
-  if (item.type === "text") state.selectedTool = "text";
+  const tool = studioToolForItem(item);
+  if (tool) state.selectedTool = tool;
   updateTimelineClipActiveStates();
   renderStudioToolPanel();
   renderStudioStage();
@@ -1874,7 +1880,14 @@ function selectFirstScene() {
 }
 
 function selectFirstItemForScene(sceneId) {
-  const item = timelineItems().find((entry) => entry.scene_id === sceneId && entry.type === "text") || timelineItems().find((entry) => entry.scene_id === sceneId);
+  const preferredType = {
+    media: "media",
+    text: "text",
+    captions: "caption",
+  }[state.selectedTool] || "text";
+  const item = timelineItems().find((entry) => entry.scene_id === sceneId && entry.type === preferredType)
+    || timelineItems().find((entry) => entry.scene_id === sceneId && entry.type === "media")
+    || timelineItems().find((entry) => entry.scene_id === sceneId);
   state.selectedItemId = item?.item_id || "";
 }
 
@@ -1896,6 +1909,14 @@ function selectedItem() {
 
 function timelineItems() {
   return state.timeline?.items || [];
+}
+
+function studioToolForItem(item) {
+  return {
+    media: "media",
+    text: "text",
+    caption: "captions",
+  }[item?.type] || null;
 }
 
 function toggleStudioPlayback() {
