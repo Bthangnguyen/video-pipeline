@@ -6,6 +6,8 @@ const state = {
   activeView: "start",
   selectedSceneId: "",
   selectedItemId: "",
+  previewCandidateId: "",
+  materialHealth: null,
   selectedTool: "script",
   timelineFit: true,
   timelinePixelsPerSecond: 48,
@@ -92,11 +94,15 @@ function bindEvents() {
 
   document.getElementById("generate-tts").addEventListener("click", generateTts);
   document.getElementById("save-scene").addEventListener("click", saveSelectedScene);
+  document.getElementById("generate-scene-keywords").addEventListener("click", generateSelectedSceneKeywords);
+  document.getElementById("generate-all-keywords").addEventListener("click", generateAllSceneKeywords);
   document.getElementById("split-scene").addEventListener("click", splitSelectedScene);
   document.getElementById("merge-prev-scene").addEventListener("click", mergePreviousScene);
 
   document.getElementById("search-current-scene").addEventListener("click", searchSelectedScene);
   document.getElementById("search-all-scenes").addEventListener("click", searchAllScenes);
+  document.getElementById("save-material-keywords").addEventListener("click", saveMaterialKeywords);
+  document.getElementById("run-material-health").addEventListener("click", runMaterialHealth);
   document.getElementById("download-approved").addEventListener("click", downloadApproved);
 
   document.getElementById("create-timeline").addEventListener("click", createTimeline);
@@ -212,15 +218,21 @@ async function saveScript() {
 
 async function parseScenes() {
   ensureProject();
-  await run("Parsing scenes", async () => {
+  await run("Preparing template", async () => {
     await saveScript();
     await saveSplitSettings();
     await savePreset();
-    await api(`/api/videodesign/projects/${state.projectId}/plan`, { method: "POST" });
-    await loadReview();
-    selectFirstScene();
-    navigate("plan");
+    navigate("template");
   });
+}
+
+async function createScenePlan() {
+  await saveScript();
+  await saveSplitSettings();
+  await api(`/api/videodesign/projects/${state.projectId}/plan`, { method: "POST" });
+  await loadReview();
+  selectFirstScene();
+  navigate("plan");
 }
 
 async function saveSplitSettings() {
@@ -245,11 +257,11 @@ async function savePreset() {
     template_category: "timeline_template",
   };
   state.preset.scene_media.media_source = "multi_source";
-  state.preset.scene_media.candidate_count = Number(document.getElementById("preset-candidate-count").value || state.preset.scene_media.candidate_count);
-  state.preset.scene_media.pinterest_candidate_count = Number(document.getElementById("preset-pinterest-count").value || state.preset.scene_media.pinterest_candidate_count || 4);
-  state.preset.scene_media.translate_to_chinese = document.getElementById("preset-translate").checked;
-  state.preset.voiceover.provider = document.getElementById("tts-provider").value;
-  state.preset.voiceover.voice_id = document.getElementById("voice-id").value.trim() || "en-US-AriaNeural";
+  state.preset.scene_media.candidate_count = Number(inputValue("preset-candidate-count", state.preset.scene_media.candidate_count || 4));
+  state.preset.scene_media.pinterest_candidate_count = Number(inputValue("preset-pinterest-count", state.preset.scene_media.pinterest_candidate_count || 4));
+  state.preset.scene_media.translate_to_chinese = inputChecked("preset-translate", true);
+  state.preset.voiceover.provider = inputValue("tts-provider", state.preset.voiceover.provider || "free_tts");
+  state.preset.voiceover.voice_id = inputValue("voice-id", state.preset.voiceover.voice_id || "en-US-AriaNeural").trim() || "en-US-AriaNeural";
   const data = await api(`/api/videodesign/projects/${state.projectId}/preset`, {
     method: "PATCH",
     body: state.preset,
@@ -298,19 +310,53 @@ async function saveSelectedScene() {
   const row = selectedRow();
   if (!row) return;
   await run("Saving scene", async () => {
-    await api(`/api/videodesign/projects/${state.projectId}/scenes/${row.scene.scene_id}`, {
-      method: "PATCH",
-      body: {
-        voiceover_text: document.getElementById("scene-voiceover").value.trim(),
-        tts_text: document.getElementById("scene-voiceover").value.trim(),
-        caption_text: document.getElementById("scene-voiceover").value.trim(),
-        on_screen_text: document.getElementById("scene-onscreen").value.trim(),
-        visual_brief: document.getElementById("scene-visual").value.trim(),
-        matching_keywords: document.getElementById("scene-keywords").value.split(",").map((item) => item.trim()).filter(Boolean),
-      },
+    await saveSceneDraft(row);
+    await loadReview();
+  });
+}
+
+async function generateSelectedSceneKeywords() {
+  const row = selectedRow();
+  if (!row) return;
+  await run("Generating scene keywords", async () => {
+    await saveSceneDraft(row);
+    await api(`/api/videodesign/projects/${state.projectId}/keywords/generate`, {
+      method: "POST",
+      body: { scene_ids: [row.scene.scene_id] },
+    });
+    await loadReview();
+    state.selectedSceneId = row.scene.scene_id;
+  });
+}
+
+async function generateAllSceneKeywords() {
+  ensureProject();
+  await run("Generating all scene keywords", async () => {
+    await api(`/api/videodesign/projects/${state.projectId}/keywords/generate`, {
+      method: "POST",
+      body: { scene_ids: null },
     });
     await loadReview();
   });
+}
+
+async function saveSceneDraft(row) {
+  await api(`/api/videodesign/projects/${state.projectId}/scenes/${row.scene.scene_id}`, {
+    method: "PATCH",
+    body: sceneEditorPatch(),
+  });
+}
+
+function sceneEditorPatch() {
+  const voiceover = inputValue("scene-voiceover").trim();
+  return {
+    voiceover_text: voiceover,
+    tts_text: voiceover,
+    caption_text: voiceover,
+    on_screen_text: inputValue("scene-onscreen").trim(),
+    visual_brief: inputValue("scene-visual").trim(),
+    matching_keywords: inputValue("scene-keywords").split(",").map((item) => item.trim()).filter(Boolean),
+  };
 }
 
 async function splitSelectedScene() {
@@ -335,19 +381,42 @@ async function mergePreviousScene() {
   });
 }
 
+async function saveMaterialKeywords() {
+  const row = selectedRow();
+  if (!row) return;
+  await run("Saving material keywords", async () => {
+    await saveMaterialKeywordsDraft(row);
+    await loadReview();
+  });
+}
+
+async function saveMaterialKeywordsDraft(row) {
+  const keywords = keywordsFromText(inputValue("materials-keywords"));
+  await api(`/api/videodesign/projects/${state.projectId}/scenes/${row.scene.scene_id}`, {
+    method: "PATCH",
+    body: { matching_keywords: keywords },
+  });
+}
+
+async function runMaterialHealth() {
+  const keyword = keywordsFromText(inputValue("materials-keywords"))[0] || selectedRow()?.scene.matching_keywords?.[0] || "cat";
+  state.materialHealth = { running: true, keyword, sources: [] };
+  renderMaterialHealth();
+  await run("Checking Douyin and Pinterest health", async () => {
+    state.materialHealth = await api("/api/videodesign/materials/preflight", {
+      method: "POST",
+      body: { keyword },
+    });
+    renderMaterialHealth();
+  });
+}
+
 async function searchSelectedScene() {
   const row = selectedRow();
   if (!row) return;
   await run("Searching selected scene", async () => {
-    const manualKeyword = document.getElementById("manual-keyword").value.trim();
-    if (manualKeyword) {
-      await api(`/api/videodesign/projects/${state.projectId}/scenes/${row.scene.scene_id}`, {
-        method: "PATCH",
-        body: { matching_keywords: [manualKeyword, ...row.scene.matching_keywords.filter((item) => item !== manualKeyword)] },
-      });
-    }
+    await saveMaterialKeywordsDraft(row);
     const body = materialSearchBody([row.scene.scene_id]);
-    if (manualKeyword) body.use_smart_keywords = false;
     await api(`/api/videodesign/projects/${state.projectId}/scenes/${row.scene.scene_id}/materials/search`, {
       method: "POST",
       body,
@@ -359,6 +428,8 @@ async function searchSelectedScene() {
 async function searchAllScenes() {
   ensureProject();
   await run("Searching all scenes", async () => {
+    const row = selectedRow();
+    if (row) await saveMaterialKeywordsDraft(row);
     startProgressPolling();
     try {
       await api(`/api/videodesign/projects/${state.projectId}/materials/search`, {
@@ -419,16 +490,17 @@ async function createTimeline() {
 }
 
 function materialSearchBody(sceneIds = null) {
-  const douyinMin = Number(document.getElementById("douyin-min-count").value || state.preset.scene_media.candidate_count || 0);
-  const pinterestMin = Number(document.getElementById("pinterest-min-count").value || state.preset.scene_media.pinterest_candidate_count || 0);
+  const douyinMin = Number(inputValue("douyin-min-count", state.preset.scene_media.candidate_count || 0));
+  const pinterestMin = Number(inputValue("pinterest-min-count", state.preset.scene_media.pinterest_candidate_count || 0));
+  const queryCount = clamp(Number(inputValue("queries-per-scene", 2)) || 2, 1, 3);
   return {
     scene_ids: sceneIds,
     candidates_per_scene: Math.max(douyinMin, 1),
     douyin_min_per_scene: douyinMin,
     pinterest_min_per_scene: pinterestMin,
-    queries_per_scene: 1,
-    translate_to_chinese: document.getElementById("translate-query").checked,
-    use_smart_keywords: document.getElementById("smart-keywords").checked,
+    queries_per_scene: queryCount,
+    translate_to_chinese: inputChecked("translate-query", true),
+    use_smart_keywords: inputChecked("smart-keywords", false),
   };
 }
 
@@ -482,7 +554,7 @@ function renderSummaryRails() {
     rail.querySelector("[data-summary-action='save-template']").addEventListener("click", async () => {
       await run("Saving preset", async () => {
         await savePreset();
-        if (!state.rows.length) await parseScenes();
+        if (!state.rows.length) await createScenePlan();
         else navigate("plan");
       });
     });
@@ -529,20 +601,26 @@ function sceneRailButton(row) {
 function renderSceneEditor() {
   const row = selectedRow();
   document.getElementById("plan-scene-title").textContent = row ? `Scene ${row.scene.order}` : "Select a scene";
-  document.getElementById("scene-voiceover").value = row?.scene.voiceover_text || "";
-  document.getElementById("scene-onscreen").value = row?.scene.on_screen_text || "";
-  document.getElementById("scene-visual").value = row?.scene.visual_brief || "";
-  document.getElementById("scene-keywords").value = row?.scene.matching_keywords?.join(", ") || "";
+  setInputValue("scene-voiceover", row?.scene.voiceover_text || "");
+  setInputValue("scene-onscreen", row?.scene.on_screen_text || "");
+  setInputValue("scene-visual", row?.scene.visual_brief || "");
+  setInputValue("scene-keywords", row?.scene.matching_keywords?.join(", ") || "");
 }
 
 function renderTtsStatus() {
   const panel = document.getElementById("tts-status-panel");
   if (!panel) return;
   const rows = state.rows || [];
+  const row = selectedRow();
   const synced = rows.filter((row) => row.scene.tts?.sync_state === "synced").length;
+  const audioUrl = row?.scene.tts?.audio_url || "";
   panel.innerHTML = `
     <h3>TTS status</h3>
     <p class="vd-muted">${synced}/${rows.length} scenes have audio timing.</p>
+    <div class="vd-audio-preview">
+      <strong>${row ? `Scene ${row.scene.order} voice` : "Voice preview"}</strong>
+      ${audioUrl ? `<audio controls preload="none" src="${audioUrl}"></audio>` : `<p class="vd-muted">Generate TTS to preview the selected scene voice.</p>`}
+    </div>
     <div class="vd-tts-list">
       ${rows.length ? rows.map((row) => `
         <button class="vd-tts-row" data-scene-id="${row.scene.scene_id}" data-active="${row.scene.scene_id === state.selectedSceneId}" type="button">
@@ -567,11 +645,11 @@ function renderCandidateBoard() {
   const row = selectedRow();
   const board = document.getElementById("candidate-board");
   document.getElementById("materials-scene-title").textContent = row ? `Scene ${row.scene.order}: ${row.scene.approval_state}` : "Select a scene";
+  renderMaterialControls(row);
   if (!row) {
     board.innerHTML = `<div class="vd-empty">Select a scene to review candidates.</div>`;
     return;
   }
-  document.getElementById("manual-keyword").value = document.getElementById("manual-keyword").value || row.scene.matching_keywords[0] || "";
   if (!row.candidates.length) {
     board.innerHTML = `
       <div class="vd-empty">
@@ -602,6 +680,9 @@ function renderCandidateBoard() {
   board.querySelectorAll("[data-placeholder-scene]").forEach((button) => {
     button.addEventListener("click", () => allowPlaceholder(button.dataset.placeholderScene));
   });
+  board.querySelectorAll("[data-preview-candidate]").forEach((button) => {
+    button.addEventListener("click", () => previewCandidate(button.dataset.previewCandidate));
+  });
 }
 
 function candidateCards(candidates, row, source) {
@@ -612,15 +693,98 @@ function candidateCards(candidates, row, source) {
       <div>
         <span class="vd-source-badge">${escapeHtml(sourceLabel(candidate.source))}</span>
         <h3>${escapeHtml(candidate.title || candidate.source_item_id || candidate.douyin_aweme_id)}</h3>
-        <p>${escapeHtml(candidate.match_reason)} Score ${candidate.score}</p>
+        <p>${escapeHtml(candidate.match_reason)}</p>
         <p>${formatDuration(candidate.duration)} / ${escapeHtml(candidate.source_item_id || candidate.douyin_aweme_id)}</p>
         <div class="vd-button-row">
           <button data-approve-candidate="${candidate.candidate_id}" data-approve-scene="${row.scene.scene_id}" type="button">${candidate.status === "approved" ? "Approved" : "Approve"}</button>
-          <a href="${candidate.stream_url}" target="_blank" rel="noreferrer">Preview stream</a>
+          <button data-preview-candidate="${candidate.candidate_id}" type="button">Preview</button>
         </div>
       </div>
     </article>
   `).join("");
+}
+
+function renderMaterialControls(row) {
+  const keywords = row?.scene.matching_keywords || [];
+  const chips = document.getElementById("materials-keyword-chips");
+  if (chips) {
+    chips.innerHTML = keywords.length
+      ? keywords.map((keyword) => `<button data-keyword-chip="${escapeHtml(keyword)}" type="button">${escapeHtml(keyword)}</button>`).join("")
+      : `<span class="vd-muted">No keywords yet.</span>`;
+    chips.querySelectorAll("[data-keyword-chip]").forEach((button) => {
+      button.addEventListener("click", () => setInputValue("materials-keywords", button.dataset.keywordChip || ""));
+    });
+  }
+  setInputValue("materials-keywords", keywords.join(", "));
+  renderSearchErrors(row);
+  renderMaterialHealth();
+  renderMaterialPreview(row);
+}
+
+function renderSearchErrors(row) {
+  const panel = document.getElementById("materials-search-errors");
+  if (!panel) return;
+  const errors = (row?.search_errors || []).slice(-6);
+  panel.innerHTML = errors.length
+    ? `
+      <h4>Search issues</h4>
+      ${errors.map((error) => `
+        <div class="vd-search-error">
+          <strong>${escapeHtml(sourceLabel(error.source))} / ${escapeHtml(error.keyword)}</strong>
+          <span>${escapeHtml(error.code)}</span>
+        </div>
+      `).join("")}
+    `
+    : "";
+}
+
+function renderMaterialPreview(row) {
+  const panel = document.getElementById("materials-preview");
+  if (!panel) return;
+  const candidate = row?.candidates.find((item) => item.candidate_id === state.previewCandidateId);
+  if (!candidate) {
+    panel.innerHTML = `<div class="vd-empty">Choose a candidate to preview here.</div>`;
+    return;
+  }
+  panel.innerHTML = `
+    <h4>${escapeHtml(sourceLabel(candidate.source))} preview</h4>
+    <video controls playsinline preload="metadata" poster="${candidate.cover_url}" src="${candidate.stream_url}"></video>
+    <strong>${escapeHtml(candidate.title || candidate.source_item_id || candidate.douyin_aweme_id)}</strong>
+    <p>${escapeHtml(candidate.search_keyword || candidate.match_reason || "")}</p>
+  `;
+}
+
+function renderMaterialHealth() {
+  const panel = document.getElementById("material-health-panel");
+  if (!panel) return;
+  const health = state.materialHealth;
+  if (!health) {
+    panel.innerHTML = `<div class="vd-muted">Run health check before searching if Douyin or Pinterest feels unstable.</div>`;
+    return;
+  }
+  if (health.running) {
+    panel.innerHTML = `<div class="vd-health-running">Checking cookie, anti-bot, page load, input search, and network for "${escapeHtml(health.keyword)}"...</div>`;
+    return;
+  }
+  panel.innerHTML = `
+    <h4>Search health: ${health.healthy ? "Ready" : "Needs attention"}</h4>
+    ${(health.sources || []).map((source) => `
+      <section class="vd-health-source" data-ok="${source.success ? "true" : "false"}">
+        <strong>${escapeHtml(sourceLabel(source.source))}</strong>
+        ${(source.checks || []).map((check) => `
+          <div class="vd-health-check" data-ok="${check.ok ? "true" : "false"}">
+            <span>${check.ok ? "OK" : "FAIL"}</span>
+            <p><b>${escapeHtml(check.name)}</b> ${escapeHtml(check.message)}</p>
+          </div>
+        `).join("")}
+      </section>
+    `).join("")}
+  `;
+}
+
+function previewCandidate(candidateId) {
+  state.previewCandidateId = candidateId;
+  renderCandidateBoard();
 }
 
 function renderStudio() {
@@ -1135,6 +1299,9 @@ async function pollProgress() {
       state.lastProgressMessage = progress.message;
       setStatus(progress.message, progress.stage === "idle" ? "idle" : "running");
     }
+    if (progress.stage === "materials_search") {
+      await loadReview();
+    }
   } catch {
     return;
   }
@@ -1142,21 +1309,22 @@ async function pollProgress() {
 
 function hydrateProjectFields(updateInputs = true) {
   if (!state.project || !updateInputs) return;
-  document.getElementById("script-idea").value = state.project.idea || "";
-  document.getElementById("script-editor").value = state.project.script || "";
+  setInputValue("script-idea", state.project.idea || "");
+  setInputValue("script-editor", state.project.script || "");
   if (state.project.split_settings) {
-    document.getElementById("split-mode").value = state.project.split_settings.split_mode || "normal";
-    document.getElementById("max-words").value = state.project.split_settings.max_words_per_scene || 18;
-    document.getElementById("scene-seconds").value = state.project.split_settings.target_scene_duration_seconds || 4;
+    setInputValue("split-mode", state.project.split_settings.split_mode || "normal");
+    setInputValue("max-words", state.project.split_settings.max_words_per_scene || 18);
+    setInputValue("scene-seconds", state.project.split_settings.target_scene_duration_seconds || 4);
   }
-  document.getElementById("tts-provider").value = state.preset.voiceover.provider || "free_tts";
-  document.getElementById("voice-id").value = state.preset.voiceover.voice_id || "en-US-AriaNeural";
-  document.getElementById("preset-candidate-count").value = state.preset.scene_media.candidate_count || 4;
-  document.getElementById("preset-pinterest-count").value = state.preset.scene_media.pinterest_candidate_count || 4;
-  document.getElementById("douyin-min-count").value = state.preset.scene_media.candidate_count || 4;
-  document.getElementById("pinterest-min-count").value = state.preset.scene_media.pinterest_candidate_count || 4;
-  document.getElementById("preset-translate").checked = Boolean(state.preset.scene_media.translate_to_chinese);
-  document.getElementById("translate-query").checked = Boolean(state.preset.scene_media.translate_to_chinese);
+  setInputValue("tts-provider", state.preset.voiceover.provider || "free_tts");
+  setInputValue("voice-id", state.preset.voiceover.voice_id || "en-US-AriaNeural");
+  setInputValue("preset-candidate-count", state.preset.scene_media.candidate_count || 4);
+  setInputValue("preset-pinterest-count", state.preset.scene_media.pinterest_candidate_count || 4);
+  setInputValue("douyin-min-count", state.preset.scene_media.candidate_count || 4);
+  setInputValue("pinterest-min-count", state.preset.scene_media.pinterest_candidate_count || 4);
+  setInputValue("queries-per-scene", 2);
+  setInputChecked("preset-translate", Boolean(state.preset.scene_media.translate_to_chinese));
+  setInputChecked("translate-query", Boolean(state.preset.scene_media.translate_to_chinese));
 }
 
 function updateDurationLabel() {
@@ -1402,6 +1570,10 @@ function sentenceCount(text) {
   return String(text || "").split(/[.!?]+/).map((part) => part.trim()).filter(Boolean).length;
 }
 
+function keywordsFromText(text) {
+  return String(text || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
 function formatDuration(seconds) {
   const value = Number(seconds || 0);
   const mins = Math.floor(value / 60);
@@ -1411,6 +1583,26 @@ function formatDuration(seconds) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function inputValue(id, fallback = "") {
+  const input = document.getElementById(id);
+  return input ? input.value : String(fallback ?? "");
+}
+
+function inputChecked(id, fallback = false) {
+  const input = document.getElementById(id);
+  return input ? Boolean(input.checked) : Boolean(fallback);
+}
+
+function setInputValue(id, value) {
+  const input = document.getElementById(id);
+  if (input) input.value = value;
+}
+
+function setInputChecked(id, value) {
+  const input = document.getElementById(id);
+  if (input) input.checked = Boolean(value);
 }
 
 function escapeHtml(value) {

@@ -1,3 +1,6 @@
+import asyncio
+
+from app.douyinsearch.browser_client import BrowserClient
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -12,6 +15,14 @@ def test_health():
 
     assert response.status_code == 200
     assert response.json()["module"] == "douyinsearch"
+
+
+def test_douyin_preflight_missing_cookie_file(tmp_path):
+    result = asyncio.run(BrowserClient(tmp_path / "missing.txt", True, False).preflight_check())
+
+    assert result["success"] is False
+    assert result["state"] == "missing_cookie_file"
+    assert result["checks"][0]["name"] == "cookie_file"
 
 
 def test_videodesign_page():

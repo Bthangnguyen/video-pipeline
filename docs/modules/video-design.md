@@ -267,8 +267,8 @@ The first version should keep matching simple and inspectable:
 2. Generate 1-3 Douyin search keywords per scene.
 3. Call `POST /api/douyin/search` separately for each scene.
 4. Normalize returned Douyin results into `MediaCandidate`.
-5. Score candidates against scene intent, TTS duration, and template constraints.
-6. Keep the top candidates for user review.
+5. Keep returned candidates grouped by source and scene for user review.
+6. Show the exact keyword used so the user can edit and search again.
 
 One scene must not silently reuse another scene's search results unless the user explicitly copies that media choice.
 
@@ -287,23 +287,13 @@ Search task example:
 }
 ```
 
-Candidate scoring should be explainable:
-
-```text
-semantic relevance        40%
-visual context match      20%
-template/safe-zone fit    20%
-duration/quality fit      10%
-diversity vs other scenes 10%
-```
-
-For Douyin V1, available signals are limited to title, description, author, duration, cover, dimensions, and raw metadata from `douyinsearch`. The system should store a `match_reason` so the user can see why a clip was proposed.
+For Douyin V1, available signals are limited to title, description, author, duration, cover, dimensions, and raw metadata from `douyinsearch`. Candidate quality is decided by user preview, not by an unstable scoring system.
 
 Candidate list requirements per scene:
 
 - show the proposed primary video first
 - show 3-5 alternatives when available
-- show cover, title, author, duration, and match reason
+- show cover, title, author, duration, source, and search keyword
 - allow inline preview through `stream_url`
 - allow manual keyword search for that same scene
 - keep rejected candidates hidden unless the user asks to restore them
@@ -320,8 +310,7 @@ Each row represents one scene:
 - selected template scene
 - primary proposed Douyin video
 - 3-5 alternative candidates
-- match reason
-- confidence score
+- source and search keyword used
 - controls:
   - approve
   - reject
@@ -553,8 +542,7 @@ Example icon layer:
   "stream_url": "/api/douyin/results/dyr_.../stream",
   "download_url": "/api/douyin/results/dyr_.../download",
   "duration": 12.5,
-  "score": 0.82,
-  "match_reason": "Matches cat reaction scene and leaves bottom caption space.",
+  "match_reason": "Douyin result 1 for scene 1.",
   "status": "proposed"
 }
 ```

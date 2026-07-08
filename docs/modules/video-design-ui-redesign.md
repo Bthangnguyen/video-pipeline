@@ -144,7 +144,7 @@ Layout:
 - main candidate grid for selected scene
   - primary proposed candidate first
   - alternatives below
-  - cover, title, duration, score, match reason
+  - cover, title, duration, source, search keyword
   - preview/play button
   - approve/reject
 - right search panel

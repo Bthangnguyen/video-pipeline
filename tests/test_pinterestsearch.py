@@ -1,8 +1,10 @@
 import json
+import asyncio
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.pinterestsearch.browser_client import BrowserClient
 from app.pinterestsearch.cookies import cookie_header_from_file, load_cookies, parse_cookie_string
 from app.pinterestsearch.media_proxy import MediaProxy
 from app.pinterestsearch.parser import parse_api_payloads, parse_dom_cards
@@ -17,6 +19,14 @@ def test_pinterest_health():
 
     assert response.status_code == 200
     assert response.json()["module"] == "pinterestsearch"
+
+
+def test_pinterest_preflight_missing_cookie_file(tmp_path):
+    result = asyncio.run(BrowserClient(tmp_path / "missing.txt", True, False).preflight_check())
+
+    assert result["success"] is False
+    assert result["state"] == "missing_cookie_file"
+    assert result["checks"][0]["name"] == "cookie_file"
 
 
 def test_pinterest_cookie_plain_string():
@@ -61,6 +71,23 @@ def test_parse_pinterest_cards_filters_video_vertical():
     assert results[0].pin_id == "123"
     assert results[0].media_type == "video"
     assert results[0].aspect_ratio == "9:16"
+
+
+def test_parse_pinterest_cards_ignores_blob_video_url():
+    cards = [
+        {
+            "href": "https://www.pinterest.com/pin/123/",
+            "title": "vertical cat",
+            "video_url": "blob:https://www.pinterest.com/local",
+            "image_url": "https://i.pinimg.com/cover.jpg",
+            "width": 720,
+            "height": 1280,
+        }
+    ]
+
+    results = parse_dom_cards(cards, limit=10, media_type="video", aspect_ratio="9:16", tolerance=0.1)
+
+    assert results == []
 
 
 def test_parse_pinterest_api_payload_extracts_video_metadata():

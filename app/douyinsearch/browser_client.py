@@ -45,6 +45,40 @@ class BrowserClient:
         finally:
             await context.close()
 
+    async def preflight_check(self, keyword: str = "cat") -> dict:
+        checks = []
+        if not self.cookie_file.exists():
+            checks.append(_check("cookie_file", False, "Cookie file does not exist."))
+            return {"success": False, "source": "douyinsearch", "state": "missing_cookie_file", "checks": checks}
+        checks.append(_check("cookie_file", True, str(self.cookie_file)))
+
+        context = await self._new_context()
+        page = await context.new_page()
+        state = "unknown"
+        try:
+            await page.goto("https://www.douyin.com/jingxuan", wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(1500)
+            checks.append(_check("load_jingxuan", True, "Loaded https://www.douyin.com/jingxuan."))
+            state = await self._detect_page_state(page)
+            checks.append(_check("anti_bot", state == "valid", self._session_message(state), {"state": state}))
+
+            input_locator = page.locator('[data-e2e="searchbar-input"]').first
+            button_locator = page.locator('[data-e2e="searchbar-button"]').first
+            input_ready = await input_locator.count() > 0 and await button_locator.count() > 0
+            if input_ready:
+                await input_locator.click(timeout=5000)
+                await input_locator.press("Control+A", timeout=3000)
+                await input_locator.press("Backspace", timeout=3000)
+                await input_locator.type(keyword, delay=30, timeout=8000)
+                checks.append(_check("input_search", True, f"Search input accepted '{keyword}'."))
+            else:
+                checks.append(_check("input_search", False, "Search input or button was not found."))
+        except Exception as exc:
+            checks.append(_check("network_douyin", False, str(exc)))
+        finally:
+            await context.close()
+        return {"success": all(item["ok"] for item in checks), "source": "douyinsearch", "state": state, "checks": checks}
+
     async def search(self, keyword: str, limit: int) -> tuple[list[DouyinResult], dict]:
         if not self.cookie_file.exists():
             raise DouyinSearchError(MISSING_COOKIE_FILE, "Cookie file does not exist.")
@@ -217,3 +251,7 @@ class BrowserClient:
             "challenge_required": "Douyin challenge or captcha is required.",
             "network_error": "Cannot reach Douyin.",
         }.get(state, "Unknown session state.")
+
+
+def _check(name: str, ok: bool, message: str, detail: dict | None = None) -> dict:
+    return {"name": name, "ok": ok, "message": message, "detail": detail or {}}

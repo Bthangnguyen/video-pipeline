@@ -45,6 +45,45 @@ class BrowserClient:
         finally:
             await context.close()
 
+    async def preflight_check(self, keyword: str = "cat") -> dict:
+        checks = []
+        if not self.cookie_file.exists():
+            checks.append(_check("cookie_file", False, "Cookie file does not exist."))
+            return {"success": False, "source": "pinterestsearch", "state": "missing_cookie_file", "checks": checks}
+        checks.append(_check("cookie_file", True, str(self.cookie_file)))
+
+        context = await self._new_context()
+        page = await context.new_page()
+        state = "unknown"
+        try:
+            await page.goto("https://www.pinterest.com/", wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(1500)
+            checks.append(_check("load_home", True, "Loaded https://www.pinterest.com/."))
+            state = await self._detect_page_state(page)
+            checks.append(_check("anti_bot", state == "valid", self._session_message(state), {"state": state}))
+
+            search_url = f"https://www.pinterest.com/search/videos/?q={quote(keyword)}&rs=typed"
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(1500)
+            checks.append(_check("load_video_search", True, f"Loaded Pinterest video search for '{keyword}'."))
+            state = await self._detect_page_state(page)
+            if state != "valid":
+                checks.append(_check("anti_bot_search", False, self._session_message(state), {"state": state}))
+
+            input_locator = page.locator('input[name="searchBoxInput"], input[type="search"], input[aria-label*="Search"]').first
+            if await input_locator.count() > 0:
+                await input_locator.click(timeout=5000)
+                await input_locator.press("Control+A", timeout=3000)
+                await input_locator.type(keyword, delay=30, timeout=8000)
+                checks.append(_check("input_search", True, f"Search input accepted '{keyword}'."))
+            else:
+                checks.append(_check("input_search", False, "Search input was not found."))
+        except Exception as exc:
+            checks.append(_check("network_pinterest", False, str(exc)))
+        finally:
+            await context.close()
+        return {"success": all(item["ok"] for item in checks), "source": "pinterestsearch", "state": state, "checks": checks}
+
     async def search(self, request: SearchRequest) -> tuple[list[PinterestResult], dict]:
         if not self.cookie_file.exists():
             raise PinterestSearchError(MISSING_COOKIE_FILE, "Cookie file does not exist.")
@@ -264,3 +303,7 @@ class BrowserClient:
             "challenge_required": "Pinterest challenge or captcha is required.",
             "network_error": "Cannot reach Pinterest.",
         }.get(state, "Unknown session state.")
+
+
+def _check(name: str, ok: bool, message: str, detail: dict | None = None) -> dict:
+    return {"name": name, "ok": ok, "message": message, "detail": detail or {}}

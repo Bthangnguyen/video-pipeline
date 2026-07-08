@@ -91,9 +91,10 @@ def aspect_label(width: int, height: int) -> str:
 def _result_from_card(card: dict) -> PinterestResult:
     href = str(card.get("href") or "")
     pin_id = str(card.get("pin_id") or _pin_id_from_url(href))
-    media_type = "video" if card.get("video_url") else "image"
-    media_url = str(card.get("video_url") or card.get("image_url") or "")
-    cover_url = str(card.get("image_url") or card.get("video_poster") or media_url)
+    video_url = _usable_url(card.get("video_url"))
+    media_type = "video" if video_url else "image"
+    media_url = video_url or _usable_url(card.get("image_url"))
+    cover_url = _usable_url(card.get("image_url")) or _usable_url(card.get("video_poster")) or media_url
     width = _int(card.get("width"))
     height = _int(card.get("height"))
     return PinterestResult(
@@ -148,6 +149,11 @@ def _result_from_pin(pin: dict) -> PinterestResult:
         author_url=f"https://www.pinterest.com/{pinner.get('username')}/" if pinner.get("username") else "",
         raw=pin,
     )
+
+
+def _usable_url(value) -> str:
+    url = str(value or "")
+    return "" if url.lower().startswith("blob:") else url
 
 
 def _best_video(pin: dict) -> dict:

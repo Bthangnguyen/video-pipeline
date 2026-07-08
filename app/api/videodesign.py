@@ -6,7 +6,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from app.videodesign.errors import PROJECT_NOT_FOUND, SCENE_NOT_FOUND, VideoDesignError
 from app.videodesign.schemas import (
     CreateProjectRequest,
+    KeywordGenerateRequest,
     MaterialsDownloadRequest,
+    MaterialsPreflightRequest,
     MaterialsSearchRequest,
     SceneSelectionRequest,
     ScriptGenerateRequest,
@@ -117,6 +119,14 @@ async def generate_tts(project_id: str, request: TTSGenerateRequest):
         return error_response(error)
 
 
+@router.post("/projects/{project_id}/keywords/generate")
+async def generate_keywords(project_id: str, request: KeywordGenerateRequest):
+    try:
+        return await videodesign_service.generate_scene_keywords(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
 @router.get("/projects/{project_id}/scenes/{scene_id}/audio")
 async def scene_audio(project_id: str, scene_id: str):
     try:
@@ -136,6 +146,14 @@ async def scene_audio(project_id: str, scene_id: str):
 async def search_materials(project_id: str, request: MaterialsSearchRequest):
     try:
         return await videodesign_service.search_materials(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/materials/preflight")
+async def materials_preflight(request: MaterialsPreflightRequest):
+    try:
+        return await videodesign_service.materials_preflight(request)
     except VideoDesignError as error:
         return error_response(error)
 

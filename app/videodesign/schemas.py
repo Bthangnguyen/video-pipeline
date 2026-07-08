@@ -77,6 +77,8 @@ class MediaCandidate(BaseModel):
     scene_id: str
     source_result_id: str = ""
     source_item_id: str = ""
+    source_url: str = ""
+    search_keyword: str = ""
     douyin_result_id: str = ""
     douyin_aweme_id: str = ""
     title: str = ""
@@ -84,7 +86,6 @@ class MediaCandidate(BaseModel):
     stream_url: str = ""
     download_url: str = ""
     duration: float = 0
-    score: float = 0
     match_reason: str = ""
     status: CandidateStatus = "proposed"
 
@@ -97,6 +98,8 @@ class MaterialAsset(BaseModel):
     source: str = "douyinsearch"
     source_result_id: str = ""
     source_item_id: str = ""
+    source_url: str = ""
+    search_keyword: str = ""
     douyin_result_id: str = ""
     douyin_aweme_id: str = ""
     local_path: str
@@ -187,6 +190,10 @@ class TTSGenerateRequest(BaseModel):
     voice_id: str | None = None
 
 
+class KeywordGenerateRequest(BaseModel):
+    scene_ids: list[str] | None = None
+
+
 class MaterialsSearchRequest(BaseModel):
     scene_ids: list[str] | None = None
     candidates_per_scene: int = Field(default=5, ge=1, le=10)
@@ -195,6 +202,10 @@ class MaterialsSearchRequest(BaseModel):
     queries_per_scene: int = Field(default=2, ge=1, le=3)
     translate_to_chinese: bool = True
     use_smart_keywords: bool = False
+
+
+class MaterialsPreflightRequest(BaseModel):
+    keyword: str = "cat"
 
 
 class SceneSelectionRequest(BaseModel):

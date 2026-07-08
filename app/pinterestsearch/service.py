@@ -24,6 +24,9 @@ class PinterestSearchService:
     async def check_session(self) -> dict:
         return await self.browser.check_session()
 
+    async def preflight_check(self, keyword: str = "cat") -> dict:
+        return await self.browser.preflight_check(keyword)
+
     async def search(self, request: SearchRequest) -> SearchResponse:
         keyword = request.keyword.strip()
         if not keyword:

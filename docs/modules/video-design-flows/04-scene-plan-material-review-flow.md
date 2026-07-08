@@ -131,8 +131,8 @@ Candidate review grid:
 - title
 - author
 - duration
-- score
-- match reason
+- source
+- search keyword used
 - approve/reject buttons
 
 Right search panel:
@@ -210,25 +210,16 @@ Download:
 POST /api/videodesign/projects/{project_id}/materials/download
 ```
 
-## Candidate Scoring
+## Candidate Ranking
 
-V2 scoring can remain inspectable and simple.
+The module should not assign a quality score to video candidates. Candidate quality is too unstable without video understanding, so the product should focus on generating better search keywords and making preview/approval fast.
 
-Inputs:
+Each candidate should show:
 
-- keyword hits in title/description
-- duration fit
-- aspect ratio when available
-- duplicate candidate check
-- template safe-zone hints later
-
-Score display:
-
-```text
-0.82 - Matches cat reaction keyword and duration fits scene.
-```
-
-Each candidate must have a `match_reason`.
+- source
+- search keyword used
+- title/author/duration when available
+- inline preview
 
 ## Approval Rules
 
@@ -299,4 +290,3 @@ For per-scene search:
 - User can download only approved videos.
 - Downloaded videos become local `MaterialAsset` records.
 - Studio is blocked until each scene is downloaded or marked placeholder.
-

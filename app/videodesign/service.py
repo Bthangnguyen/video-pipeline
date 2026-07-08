@@ -1,14 +1,22 @@
 import asyncio
+import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
 
+from app.douyinsearch.config import settings as douyin_settings
+from app.douyinsearch.cookies import cookie_header_from_file as douyin_cookie_header_from_file
 from app.douyinsearch.errors import DouyinSearchError
 from app.douyinsearch.schemas import SearchRequest
 from app.douyinsearch.service import douyin_service
+from app.pinterestsearch.config import settings as pinterest_settings
+from app.pinterestsearch.cookies import cookie_header_from_file as pinterest_cookie_header_from_file
 from app.pinterestsearch.errors import PinterestSearchError
 from app.pinterestsearch.schemas import SearchRequest as PinterestSearchRequest
 from app.pinterestsearch.service import pinterest_service
 from app.videodesign.config import settings
+from app.videodesign.downloader import YtDlpDownloader
 from app.videodesign.errors import (
     CANDIDATE_NOT_FOUND,
     DOWNLOAD_FAILED,
@@ -17,6 +25,7 @@ from app.videodesign.errors import (
     MATERIAL_SEARCH_TIMEOUT,
     SCENE_NOT_FOUND,
     SCENE_NOT_READY,
+    SCRIPT_GENERATION_FAILED,
     SCRIPT_REQUIRED,
     VideoDesignError,
 )
@@ -24,7 +33,9 @@ from app.videodesign.planner import estimate_duration, make_caption_chunks, refr
 from app.videodesign.schemas import (
     CreateProjectRequest,
     DouyinSearchTask,
+    KeywordGenerateRequest,
     MaterialsDownloadRequest,
+    MaterialsPreflightRequest,
     MaterialsSearchRequest,
     MaterialAsset,
     MediaCandidate,
@@ -44,11 +55,62 @@ from app.videodesign.store import VideoDesignStore
 from app.videodesign.tts import TTSClient
 
 
+KEYWORD_STOPWORDS = {
+    "about",
+    "after",
+    "again",
+    "also",
+    "and",
+    "any",
+    "are",
+    "because",
+    "but",
+    "can",
+    "could",
+    "did",
+    "does",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "her",
+    "his",
+    "how",
+    "into",
+    "its",
+    "just",
+    "not",
+    "now",
+    "off",
+    "our",
+    "out",
+    "over",
+    "she",
+    "that",
+    "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "this",
+    "too",
+    "was",
+    "what",
+    "when",
+    "will",
+    "with",
+    "you",
+    "your",
+}
+
+
 class VideoDesignService:
     def __init__(self):
         self.store = VideoDesignStore()
         self.script_client = DeepSeekScriptClient()
         self.tts_client = TTSClient()
+        self.ytdlp = YtDlpDownloader()
 
     def health(self) -> dict:
         return {
@@ -190,6 +252,34 @@ class VideoDesignService:
         self.store.put(project)
         return {"success": True, "scenes": [scene.model_dump() for scene in scenes]}
 
+    async def generate_scene_keywords(self, project_id: str, request: KeywordGenerateRequest) -> dict:
+        project = self.store.get(project_id)
+        scenes = _selected_scenes(project, request.scene_ids)
+        errors = []
+        total = len(scenes)
+        self._set_progress(project, "keyword_generation", "Preparing search keywords.", 0, total)
+        for index, scene in enumerate(scenes, start=1):
+            keywords, error = await self._smart_keywords_or_fallback(project, scene, 3)
+            scene.matching_keywords = keywords
+            if error:
+                errors.append({"scene_id": scene.scene_id, "error": error})
+            self._set_progress(
+                project,
+                "keyword_generation",
+                f"Prepared scene {index}/{total} keywords: {', '.join(keywords[:2])}",
+                index,
+                total,
+                {"scene_id": scene.scene_id, "fallback": bool(error)},
+            )
+        self.store.put(project)
+        self._set_progress(project, "idle", "Keyword generation finished.", total, total)
+        return {
+            "success": True,
+            "project_id": project.project_id,
+            "scenes": [scene.model_dump() for scene in scenes],
+            "errors": errors,
+        }
+
     async def search_materials(self, project_id: str, request: MaterialsSearchRequest) -> dict:
         project = self.store.get(project_id)
         scenes = _selected_scenes(project, request.scene_ids)
@@ -243,7 +333,7 @@ class VideoDesignService:
                                         strategy="auto",
                                     )
                                 ),
-                                timeout=60,
+                                timeout=45,
                             )
                         else:
                             response = await asyncio.wait_for(
@@ -258,8 +348,10 @@ class VideoDesignService:
                                 timeout=90,
                             )
                         task.status = "completed"
-                        candidate_ids = _add_candidates(project, scene, response.items, needed, source)
+                        candidate_ids = _add_candidates(project, scene, response.items, needed, source, keyword)
                         task.candidate_ids.extend(candidate_ids)
+                        if candidate_ids:
+                            scene.approval_state = "needs_review"
                     except asyncio.TimeoutError:
                         task.status = "failed"
                         task.error = {
@@ -273,6 +365,8 @@ class VideoDesignService:
                     except Exception as exc:
                         task.status = "failed"
                         task.error = {"code": MATERIAL_SEARCH_FAILED, "message": str(exc), "retryable": True}
+                    finally:
+                        self.store.put(project)
             scene.approval_state = "needs_review" if _candidates_for_scene(project, scene.scene_id) else "planned"
             self._set_progress(
                 project,
@@ -286,12 +380,44 @@ class VideoDesignService:
         self._set_progress(project, "idle", "Material search finished.", total, total)
         return self.review(project_id)
 
+    async def materials_preflight(self, request: MaterialsPreflightRequest) -> dict:
+        keyword = (request.keyword or "cat").strip() or "cat"
+        results = await asyncio.gather(
+            self._source_preflight("douyinsearch", douyin_service.preflight_check(keyword)),
+            self._source_preflight("pinterestsearch", pinterest_service.preflight_check(keyword)),
+        )
+        return {"success": True, "healthy": all(result.get("success") for result in results), "keyword": keyword, "sources": results}
+
+    async def _source_preflight(self, source: str, check):
+        try:
+            return await asyncio.wait_for(check, timeout=75)
+        except Exception as exc:
+            return {
+                "success": False,
+                "source": source,
+                "state": "network_error",
+                "checks": [
+                    {
+                        "name": "preflight",
+                        "ok": False,
+                        "message": str(exc),
+                        "detail": {},
+                    }
+                ],
+            }
+
     def review(self, project_id: str) -> dict:
         project = self.store.get(project_id)
         rows = []
         for scene in project.scenes:
             candidates = _candidates_for_scene(project, scene.scene_id)
-            rows.append({"scene": scene.model_dump(), "candidates": [candidate.model_dump() for candidate in candidates]})
+            rows.append(
+                {
+                    "scene": scene.model_dump(),
+                    "candidates": [candidate.model_dump() for candidate in candidates],
+                    "search_errors": _search_errors_for_scene(project, scene.scene_id),
+                }
+            )
         return {"success": True, "project_id": project.project_id, "rows": rows}
 
     def progress(self, project_id: str) -> dict:
@@ -342,16 +468,7 @@ class VideoDesignService:
             asset_id = f"mat_{uuid.uuid4().hex}"
             output_path = settings.storage_dir / project.project_id / "materials" / f"{scene.scene_id}.mp4"
             try:
-                if candidate.source == "pinterestsearch":
-                    result = pinterest_service.store.get(candidate.source_result_id)
-                    if not result:
-                        raise VideoDesignError(DOWNLOAD_FAILED, f"Pinterest result expired for scene {scene.scene_id}.", retryable=True)
-                    await pinterest_service.media_proxy.download_to_file(result, output_path)
-                else:
-                    result = douyin_service.store.get(candidate.source_result_id or candidate.douyin_result_id)
-                    if not result:
-                        raise VideoDesignError(DOWNLOAD_FAILED, f"Douyin result expired for scene {scene.scene_id}.", retryable=True)
-                    await douyin_service.stream_proxy.download_to_file(result, output_path)
+                await self._download_candidate(candidate, output_path)
             except Exception as exc:
                 scene.approval_state = "needs_review"
                 raise VideoDesignError(DOWNLOAD_FAILED, f"Could not download approved video: {exc}", retryable=True) from exc
@@ -363,6 +480,8 @@ class VideoDesignService:
                 source=candidate.source,
                 source_result_id=candidate.source_result_id,
                 source_item_id=candidate.source_item_id,
+                source_url=candidate.source_url,
+                search_keyword=candidate.search_keyword,
                 douyin_result_id=candidate.douyin_result_id,
                 douyin_aweme_id=candidate.douyin_aweme_id,
                 local_path=str(output_path),
@@ -375,6 +494,43 @@ class VideoDesignService:
         self.store.put(project)
         return {"success": True, "assets": downloaded}
 
+    async def _download_candidate(self, candidate: MediaCandidate, output_path: Path) -> None:
+        ytdlp_error = None
+        source_url = _download_source_url(candidate)
+        if source_url:
+            try:
+                await self.ytdlp.download(
+                    source_url,
+                    output_path,
+                    _cookie_file_for_source(candidate.source),
+                    _cookie_header_for_source(candidate.source),
+                )
+                return
+            except Exception as exc:
+                ytdlp_error = exc
+
+        try:
+            if candidate.source == "pinterestsearch":
+                result = pinterest_service.store.get(candidate.source_result_id)
+                if not result:
+                    raise VideoDesignError(DOWNLOAD_FAILED, "Pinterest result expired.", retryable=True)
+                if _is_blob_url(result.media_remote_url):
+                    raise VideoDesignError(DOWNLOAD_FAILED, "Pinterest returned a browser-local blob URL.", retryable=True)
+                await pinterest_service.media_proxy.download_to_file(result, output_path)
+            else:
+                result = douyin_service.store.get(candidate.source_result_id or candidate.douyin_result_id)
+                if not result:
+                    raise VideoDesignError(DOWNLOAD_FAILED, "Douyin result expired.", retryable=True)
+                await douyin_service.stream_proxy.download_to_file(result, output_path)
+        except Exception as exc:
+            if ytdlp_error:
+                raise VideoDesignError(
+                    DOWNLOAD_FAILED,
+                    f"{ytdlp_error}; fallback download failed: {exc}",
+                    retryable=True,
+                ) from exc
+            raise
+
     async def _keywords_for_scene(
         self,
         project: VideoDesignProject,
@@ -382,17 +538,52 @@ class VideoDesignService:
         request: MaterialsSearchRequest,
     ) -> list[str]:
         if request.use_smart_keywords:
+            keywords, _error = await self._smart_keywords_or_fallback(project, scene, request.queries_per_scene)
+            return keywords[: request.queries_per_scene]
+        keywords = _normalize_keywords(scene.matching_keywords, request.queries_per_scene)
+        if keywords:
+            return keywords
+        keywords = _fallback_keywords_for_scene(project, scene, request.queries_per_scene)
+        scene.matching_keywords = keywords
+        self.store.put(project)
+        return keywords
+
+    async def _smart_keywords_or_fallback(
+        self,
+        project: VideoDesignProject,
+        scene: ScenePlan,
+        limit: int,
+    ) -> tuple[list[str], dict | None]:
+        try:
             keywords = await self.script_client.generate_search_keywords(
                 voiceover_text=scene.voiceover_text,
                 visual_brief=scene.visual_brief,
                 on_screen_text=scene.on_screen_text,
                 language=project.language,
             )
-            if keywords:
-                scene.matching_keywords = keywords
+            normalized = _normalize_keywords(keywords, limit)
+            if normalized:
+                scene.matching_keywords = normalized
                 self.store.put(project)
-                return keywords
-        return scene.matching_keywords[: request.queries_per_scene] or [scene.visual_brief or scene.voiceover_text[:80]]
+                return normalized, None
+        except VideoDesignError as error:
+            fallback = _fallback_keywords_for_scene(project, scene, limit)
+            scene.matching_keywords = fallback
+            self.store.put(project)
+            return fallback, error.to_payload()
+        except Exception as exc:
+            fallback = _fallback_keywords_for_scene(project, scene, limit)
+            scene.matching_keywords = fallback
+            self.store.put(project)
+            return fallback, {"code": SCRIPT_GENERATION_FAILED, "message": str(exc), "retryable": True}
+        fallback = _fallback_keywords_for_scene(project, scene, limit)
+        scene.matching_keywords = fallback
+        self.store.put(project)
+        return fallback, {
+            "code": SCRIPT_GENERATION_FAILED,
+            "message": "DeepSeek did not return usable search keywords.",
+            "retryable": True,
+        }
 
     def create_studio_timeline(self, project_id: str) -> dict:
         project = self.store.get(project_id)
@@ -486,6 +677,48 @@ def _scene(project: VideoDesignProject, scene_id: str) -> ScenePlan:
     raise VideoDesignError(SCENE_NOT_FOUND, "Scene does not exist.")
 
 
+def _normalize_keywords(keywords, limit: int) -> list[str]:
+    normalized = []
+    for keyword in keywords or []:
+        value = re.sub(r"\s+", " ", str(keyword)).strip(" ,.;:-")
+        if not value or value.lower() in {item.lower() for item in normalized}:
+            continue
+        normalized.append(value[:120])
+        if len(normalized) >= max(1, limit):
+            break
+    return normalized
+
+
+def _fallback_keywords_for_scene(project: VideoDesignProject, scene: ScenePlan, limit: int) -> list[str]:
+    candidates = []
+    for text in (scene.visual_brief, scene.on_screen_text, scene.voiceover_text, project.idea, project.script):
+        phrase = _keyword_phrase(text)
+        if phrase:
+            _append_keyword(candidates, phrase)
+            if "video" not in phrase and "footage" not in phrase:
+                _append_keyword(candidates, f"{phrase} raw footage")
+        if len(candidates) >= max(1, limit):
+            break
+    return candidates[: max(1, limit)] or ["raw vertical footage"]
+
+
+def _keyword_phrase(text: str | None) -> str:
+    words = []
+    for word in re.findall(r"[A-Za-z0-9]+", text or ""):
+        value = word.lower()
+        if len(value) < 3 or value in KEYWORD_STOPWORDS or value in words:
+            continue
+        words.append(value)
+        if len(words) >= 4:
+            break
+    return " ".join(words)
+
+
+def _append_keyword(keywords: list[str], keyword: str) -> None:
+    if keyword and keyword.lower() not in {item.lower() for item in keywords}:
+        keywords.append(keyword)
+
+
 def _candidate(project: VideoDesignProject, candidate_id: str | None) -> MediaCandidate:
     for candidate in project.candidates:
         if candidate.candidate_id == candidate_id:
@@ -510,7 +743,7 @@ def _candidates_for_scene(project: VideoDesignProject, scene_id: str, source: st
     ]
 
 
-def _add_candidates(project: VideoDesignProject, scene: ScenePlan, results, limit: int, source: str) -> list[str]:
+def _add_candidates(project: VideoDesignProject, scene: ScenePlan, results, limit: int, source: str, keyword: str) -> list[str]:
     existing = {
         (candidate.source, candidate.source_result_id or candidate.douyin_result_id)
         for candidate in project.candidates
@@ -520,7 +753,7 @@ def _add_candidates(project: VideoDesignProject, scene: ScenePlan, results, limi
     for result in results:
         if (source, result.result_id) in existing:
             continue
-        candidate = _candidate_from_public_result(scene, result, len(project.candidates) + 1, source)
+        candidate = _candidate_from_public_result(scene, result, len(project.candidates) + 1, source, keyword)
         project.candidates.append(candidate)
         candidate_ids.append(candidate.candidate_id)
         if len(candidate_ids) >= limit:
@@ -528,11 +761,16 @@ def _add_candidates(project: VideoDesignProject, scene: ScenePlan, results, limi
     return candidate_ids
 
 
-def _candidate_from_public_result(scene: ScenePlan, result, index: int, source: str = "douyinsearch") -> MediaCandidate:
+def _candidate_from_public_result(
+    scene: ScenePlan,
+    result,
+    index: int,
+    source: str = "douyinsearch",
+    keyword: str = "",
+) -> MediaCandidate:
     source_item_id = str(getattr(result, "douyin_aweme_id", "") or getattr(result, "pin_id", "") or "")
     title = result.title or result.description or source_item_id
     duration = float(getattr(result, "duration", 0) or 0)
-    score = _score_candidate(scene, title, duration)
     douyin_aweme_id = source_item_id if source == "douyinsearch" else ""
     return MediaCandidate(
         candidate_id=f"cand_{uuid.uuid4().hex}",
@@ -540,6 +778,8 @@ def _candidate_from_public_result(scene: ScenePlan, result, index: int, source: 
         scene_id=scene.scene_id,
         source_result_id=result.result_id,
         source_item_id=source_item_id,
+        source_url=str(getattr(result, "source_url", "") or ""),
+        search_keyword=keyword,
         douyin_result_id=result.result_id if source == "douyinsearch" else "",
         douyin_aweme_id=douyin_aweme_id,
         title=title,
@@ -547,16 +787,64 @@ def _candidate_from_public_result(scene: ScenePlan, result, index: int, source: 
         stream_url=result.stream_url,
         download_url=result.download_url,
         duration=duration,
-        score=score,
-        match_reason=f"{source_label(source)} candidate {index} matches scene {scene.order}.",
+        match_reason=f"{source_label(source)} result {index} for scene {scene.order}.",
     )
 
 
-def _score_candidate(scene: ScenePlan, title: str, duration: float) -> float:
-    text = title.lower()
-    keyword_hits = sum(1 for keyword in scene.matching_keywords[:1] for word in keyword.split() if word.lower() in text)
-    duration_fit = 1.0 if not duration or duration >= scene.duration_seconds else 0.6
-    return round(min(1.0, 0.55 + keyword_hits * 0.08) * duration_fit, 2)
+def _search_errors_for_scene(project: VideoDesignProject, scene_id: str) -> list[dict]:
+    errors = []
+    for task in project.search_tasks:
+        if task.scene_id != scene_id or not task.error:
+            continue
+        errors.append(
+            {
+                "source": task.source,
+                "keyword": task.keyword,
+                "code": task.error.get("code", "MATERIAL_SEARCH_FAILED"),
+                "message": task.error.get("message", ""),
+                "retryable": bool(task.error.get("retryable", False)),
+            }
+        )
+    return errors
+
+
+def _download_source_url(candidate: MediaCandidate) -> str:
+    if _is_http_url(candidate.source_url):
+        return candidate.source_url
+    if candidate.source == "pinterestsearch" and candidate.source_item_id:
+        return f"https://www.pinterest.com/pin/{candidate.source_item_id}/"
+    aweme_id = candidate.douyin_aweme_id or candidate.source_item_id
+    if candidate.source == "douyinsearch" and aweme_id:
+        return f"https://www.douyin.com/video/{aweme_id}"
+    return ""
+
+
+def _cookie_file_for_source(source: str) -> Path | None:
+    if source == "pinterestsearch":
+        return pinterest_settings.cookie_file
+    if source == "douyinsearch":
+        return douyin_settings.cookie_file
+    return None
+
+
+def _cookie_header_for_source(source: str) -> str:
+    cookie_file = _cookie_file_for_source(source)
+    if not cookie_file or not cookie_file.exists():
+        return ""
+    if source == "pinterestsearch":
+        return pinterest_cookie_header_from_file(cookie_file)
+    if source == "douyinsearch":
+        return douyin_cookie_header_from_file(cookie_file)
+    return ""
+
+
+def _is_blob_url(url: str) -> bool:
+    return str(url or "").lower().startswith("blob:")
+
+
+def _is_http_url(url: str) -> bool:
+    parsed = urlparse(url or "")
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def source_label(source: str) -> str:
