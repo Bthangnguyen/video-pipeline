@@ -46,6 +46,8 @@ class PublicPinterestResult(BaseModel):
     description: str = ""
     media_type: PinterestMediaType
     media_url: str
+    stream_url: str = ""
+    download_url: str = ""
     cover_url: str
     width: int = 0
     height: int = 0

@@ -56,3 +56,19 @@ async def media(result_id: str, request: Request, url: str | None = None):
         return await pinterest_service.proxy_media(result_id, request.headers.get("range"), url)
     except PinterestSearchError as error:
         return error_response(error)
+
+
+@router.get("/results/{result_id}/stream")
+async def stream(result_id: str):
+    try:
+        return await pinterest_service.stream_video(result_id)
+    except PinterestSearchError as error:
+        return error_response(error)
+
+
+@router.get("/results/{result_id}/download")
+async def download(result_id: str):
+    try:
+        return await pinterest_service.download_video(result_id)
+    except PinterestSearchError as error:
+        return error_response(error)

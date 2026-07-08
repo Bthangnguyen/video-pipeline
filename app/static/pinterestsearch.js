@@ -44,7 +44,6 @@ async function search() {
   }
   message.textContent = `Found ${data.items.length} ${data.media_type} result(s) for ${data.keyword}`;
   renderResults(data.items);
-  setupVideos();
 }
 
 function renderResults(items) {
@@ -58,6 +57,7 @@ function renderResults(items) {
           <span>${escapeHtml(item.aspect_ratio || `${item.width}x${item.height}`)}</span>
         </div>
         <div class="actions">
+          ${item.media_type === "video" ? `<a class="download-video" href="${item.download_url}">Download MP4</a>` : ""}
           <a class="download-video" href="${item.source_url}" target="_blank" rel="noreferrer">Open pin</a>
         </div>
       </div>
@@ -67,26 +67,9 @@ function renderResults(items) {
 
 function renderMedia(item) {
   if (item.media_type === "video") {
-    return `<video controls preload="metadata" poster="${item.cover_url}" data-media-url="${item.media_url}"></video>`;
+    return `<video controls playsinline preload="none" poster="${item.cover_url}" src="${item.stream_url || item.media_url}"></video>`;
   }
   return `<img src="${item.cover_url}" alt="${escapeHtml(item.title || "Pinterest result")}">`;
-}
-
-function setupVideos() {
-  document.querySelectorAll("video[data-media-url]").forEach((video) => {
-    const source = video.dataset.mediaUrl;
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = source;
-      return;
-    }
-    if (window.Hls && Hls.isSupported()) {
-      const hls = new Hls();
-      hls.loadSource(source);
-      hls.attachMedia(video);
-      return;
-    }
-    video.src = source;
-  });
 }
 
 function escapeHtml(value) {

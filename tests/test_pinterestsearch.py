@@ -6,6 +6,7 @@ from app.main import app
 from app.pinterestsearch.cookies import cookie_header_from_file, load_cookies, parse_cookie_string
 from app.pinterestsearch.media_proxy import MediaProxy
 from app.pinterestsearch.parser import parse_api_payloads, parse_dom_cards
+from app.pinterestsearch.schemas import PinterestResult
 from app.pinterestsearch.service import pinterest_service
 
 
@@ -125,6 +126,30 @@ def test_pinterest_hls_playlist_rewrites_relative_urls(tmp_path):
     assert "/api/pinterest/results/pinr_test/media?url=" in rewritten
     assert "https%3A%2F%2Fv1.pinimg.com%2Fvideos%2Fiht%2Fhls%2Fa%2Fb%2Faudio.m3u8" in rewritten
     assert "https%3A%2F%2Fv1.pinimg.com%2Fvideos%2Fiht%2Fhls%2Fa%2Fb%2Fvideo_720w.m3u8" in rewritten
+
+
+def test_pinterest_proxy_skips_cookie_for_pinimg(tmp_path):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text("_pinterest_sess=abc", encoding="utf-8")
+    proxy = MediaProxy(cookie_file)
+
+    assert "Cookie:" not in proxy._ffmpeg_headers("https://v1.pinimg.com/videos/video.m3u8")
+    assert "Cookie: _pinterest_sess=abc" in proxy._ffmpeg_headers("https://www.pinterest.com/resource/test")
+
+
+def test_pinterest_public_result_includes_stream_and_download_urls():
+    result = PinterestResult(
+        result_id="pinr_test",
+        pin_id="123",
+        media_type="video",
+        media_remote_url="https://v1.pinimg.com/videos/video.m3u8",
+        cover_remote_url="https://i.pinimg.com/cover.jpg",
+    )
+
+    public = pinterest_service._public_result(result)
+
+    assert public.stream_url == "/api/pinterest/results/pinr_test/stream"
+    assert public.download_url == "/api/pinterest/results/pinr_test/download"
 
 
 def test_pinterest_missing_cookie_file(monkeypatch, tmp_path):

@@ -58,8 +58,11 @@ Main endpoints:
 - `GET /api/pinterest/results/{result_id}`
 - `GET /api/pinterest/results/{result_id}/cover`
 - `GET /api/pinterest/results/{result_id}/media`
+- `GET /api/pinterest/results/{result_id}/stream`
+- `GET /api/pinterest/results/{result_id}/download`
 
 Search accepts `media_type=image|video|both` and `aspect_ratio=9:16|1:1|16:9|any`. For vertical video sourcing, use `media_type=video` and `aspect_ratio=9:16`.
+Pinterest video preview uses FFmpeg to stream a browser-playable MP4 from Pinterest HLS. Download uses the same source and saves a cached MP4 under `PINTEREST_DOWNLOAD_DIR`.
 
 ## Non-Goals For Current V1
 

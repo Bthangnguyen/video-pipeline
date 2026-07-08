@@ -10,7 +10,7 @@ class PinterestSearchService:
     def __init__(self):
         self.store = ResultStore(settings.result_ttl_seconds)
         self.browser = BrowserClient(settings.cookie_file, settings.browser_headless, settings.debug)
-        self.media_proxy = MediaProxy(settings.cookie_file)
+        self.media_proxy = MediaProxy(settings.cookie_file, settings.download_dir)
 
     def health(self) -> dict:
         return {
@@ -49,6 +49,12 @@ class PinterestSearchService:
     async def proxy_media(self, result_id: str, range_header: str | None = None, url: str | None = None):
         return await self.media_proxy.proxy_media(self._stored_result(result_id), range_header, url)
 
+    async def stream_video(self, result_id: str):
+        return await self.media_proxy.stream_video(self._stored_result(result_id))
+
+    async def download_video(self, result_id: str):
+        return await self.media_proxy.download_video(self._stored_result(result_id))
+
     async def proxy_cover(self, result_id: str):
         return await self.media_proxy.proxy_cover(self._stored_result(result_id))
 
@@ -69,6 +75,8 @@ class PinterestSearchService:
             description=result.description,
             media_type=result.media_type,
             media_url=f"/api/pinterest/results/{result.result_id}/media",
+            stream_url=f"/api/pinterest/results/{result.result_id}/stream",
+            download_url=f"/api/pinterest/results/{result.result_id}/download",
             cover_url=f"/api/pinterest/results/{result.result_id}/cover",
             width=result.width,
             height=result.height,

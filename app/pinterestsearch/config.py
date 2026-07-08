@@ -31,6 +31,7 @@ class PinterestSettings:
     )
     browser_headless: bool = _bool_env("PINTEREST_BROWSER_HEADLESS", True)
     browser_profile_dir: Path = Path(os.getenv("PINTEREST_BROWSER_PROFILE_DIR", "./storage/browser/pinterest"))
+    download_dir: Path = Path(os.getenv("PINTEREST_DOWNLOAD_DIR", "./storage/pinterestsearch/downloads"))
     result_ttl_seconds: int = int(os.getenv("PINTEREST_RESULT_TTL_SECONDS", "1800"))
     debug: bool = _bool_env("PINTEREST_DEBUG", False)
 
