@@ -3,8 +3,11 @@ from fastapi.testclient import TestClient
 from app.douyinsearch.schemas import DouyinResult, PublicDouyinResult, SearchResponse
 from app.douyinsearch.service import douyin_service
 from app.main import app
+from app.pinterestsearch.schemas import PublicPinterestResult, SearchResponse as PinterestSearchResponse
+from app.pinterestsearch.service import pinterest_service
 from app.videodesign.planner import split_script
 from app.videodesign.schemas import SplitSettings
+from app.videodesign.service import videodesign_service
 
 
 def _create_project(client: TestClient) -> str:
@@ -144,6 +147,119 @@ def test_videodesign_search_single_scene_endpoint(monkeypatch):
     rows = response.json()["rows"]
     selected = next(row for row in rows if row["scene"]["scene_id"] == scene_id)
     assert selected["candidates"][0]["douyin_aweme_id"] == "aweme-single"
+
+
+def test_videodesign_search_returns_douyin_and_pinterest_candidates(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_id = plan_response.json()["scenes"][0]["scene_id"]
+
+    async def fake_douyin_search(request):
+        return SearchResponse(
+            keyword=request.keyword,
+            search_keyword=request.keyword,
+            strategy_used="browser",
+            items=[
+                PublicDouyinResult(
+                    result_id="dy-result",
+                    douyin_aweme_id="dy-aweme",
+                    title="cat raw footage",
+                    cover_url="/dy-cover",
+                    stream_url="/dy-stream",
+                    download_url="/dy-download",
+                    duration=5.0,
+                )
+            ],
+        )
+
+    async def fake_pinterest_search(request):
+        return PinterestSearchResponse(
+            keyword=request.keyword,
+            media_type="video",
+            aspect_ratio="9:16",
+            items=[
+                PublicPinterestResult(
+                    result_id="pin-result",
+                    pin_id="pin-1",
+                    title="cat vertical video",
+                    media_type="video",
+                    media_url="/pin-media",
+                    stream_url="/pin-stream",
+                    download_url="/pin-download",
+                    cover_url="/pin-cover",
+                    width=576,
+                    height=1024,
+                    aspect_ratio="9:16",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(douyin_service, "search", fake_douyin_search)
+    monkeypatch.setattr(pinterest_service, "search", fake_pinterest_search)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/search",
+        json={
+            "scene_ids": [scene_id],
+            "douyin_min_per_scene": 1,
+            "pinterest_min_per_scene": 1,
+            "queries_per_scene": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    candidates = response.json()["rows"][0]["candidates"]
+    assert {candidate["source"] for candidate in candidates} == {"douyinsearch", "pinterestsearch"}
+    assert {candidate["source_item_id"] for candidate in candidates} == {"dy-aweme", "pin-1"}
+
+
+def test_videodesign_smart_keywords_feed_material_search(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_id = plan_response.json()["scenes"][0]["scene_id"]
+    seen_keywords = []
+
+    async def fake_keywords(**kwargs):
+        return ["cat close up raw footage", "cat playing"]
+
+    async def fake_search(request):
+        seen_keywords.append(request.keyword)
+        return SearchResponse(
+            keyword=request.keyword,
+            search_keyword=request.keyword,
+            strategy_used="browser",
+            items=[
+                PublicDouyinResult(
+                    result_id="smart-dy-result",
+                    douyin_aweme_id="smart-dy",
+                    title="clean cat close up",
+                    cover_url="/cover",
+                    stream_url="/stream",
+                    download_url="/download",
+                    duration=5.0,
+                )
+            ],
+        )
+
+    monkeypatch.setattr(videodesign_service.script_client, "generate_search_keywords", fake_keywords)
+    monkeypatch.setattr(douyin_service, "search", fake_search)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/search",
+        json={
+            "scene_ids": [scene_id],
+            "douyin_min_per_scene": 1,
+            "pinterest_min_per_scene": 0,
+            "queries_per_scene": 1,
+            "use_smart_keywords": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen_keywords == ["cat close up raw footage"]
+    assert response.json()["rows"][0]["scene"]["matching_keywords"][0] == "cat close up raw footage"
 
 
 def test_videodesign_review_download_and_timeline(monkeypatch):

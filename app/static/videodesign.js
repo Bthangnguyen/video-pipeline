@@ -73,6 +73,10 @@ function bindEvents() {
     state.preset.scene_media.candidate_count = Number(document.getElementById("preset-candidate-count").value || 4);
     renderSummaryRails();
   });
+  document.getElementById("preset-pinterest-count").addEventListener("input", () => {
+    state.preset.scene_media.pinterest_candidate_count = Number(document.getElementById("preset-pinterest-count").value || 4);
+    renderSummaryRails();
+  });
   document.getElementById("preset-translate").addEventListener("change", () => {
     state.preset.scene_media.translate_to_chinese = document.getElementById("preset-translate").checked;
     renderSummaryRails();
@@ -240,8 +244,9 @@ async function savePreset() {
     template_id: "short_form_editor",
     template_category: "timeline_template",
   };
-  state.preset.scene_media.media_source = "douyin_stock";
+  state.preset.scene_media.media_source = "multi_source";
   state.preset.scene_media.candidate_count = Number(document.getElementById("preset-candidate-count").value || state.preset.scene_media.candidate_count);
+  state.preset.scene_media.pinterest_candidate_count = Number(document.getElementById("preset-pinterest-count").value || state.preset.scene_media.pinterest_candidate_count || 4);
   state.preset.scene_media.translate_to_chinese = document.getElementById("preset-translate").checked;
   state.preset.voiceover.provider = document.getElementById("tts-provider").value;
   state.preset.voiceover.voice_id = document.getElementById("voice-id").value.trim() || "en-US-AriaNeural";
@@ -341,9 +346,11 @@ async function searchSelectedScene() {
         body: { matching_keywords: [manualKeyword, ...row.scene.matching_keywords.filter((item) => item !== manualKeyword)] },
       });
     }
+    const body = materialSearchBody([row.scene.scene_id]);
+    if (manualKeyword) body.use_smart_keywords = false;
     await api(`/api/videodesign/projects/${state.projectId}/scenes/${row.scene.scene_id}/materials/search`, {
       method: "POST",
-      body: materialSearchBody([row.scene.scene_id]),
+      body,
     });
     await loadReview();
   });
@@ -412,11 +419,16 @@ async function createTimeline() {
 }
 
 function materialSearchBody(sceneIds = null) {
+  const douyinMin = Number(document.getElementById("douyin-min-count").value || state.preset.scene_media.candidate_count || 0);
+  const pinterestMin = Number(document.getElementById("pinterest-min-count").value || state.preset.scene_media.pinterest_candidate_count || 0);
   return {
     scene_ids: sceneIds,
-    candidates_per_scene: Number(document.getElementById("candidate-count").value || state.preset.scene_media.candidate_count || 4),
+    candidates_per_scene: Math.max(douyinMin, 1),
+    douyin_min_per_scene: douyinMin,
+    pinterest_min_per_scene: pinterestMin,
     queries_per_scene: 1,
     translate_to_chinese: document.getElementById("translate-query").checked,
+    use_smart_keywords: document.getElementById("smart-keywords").checked,
   };
 }
 
@@ -569,20 +581,20 @@ function renderCandidateBoard() {
       </div>
     `;
   } else {
-    board.innerHTML = row.candidates.map((candidate) => `
-      <article class="vd-candidate ${candidate.status === "approved" ? "is-approved" : ""}">
-        <img src="${candidate.cover_url}" alt="">
-        <div>
-          <h3>${escapeHtml(candidate.title || candidate.douyin_aweme_id)}</h3>
-          <p>${escapeHtml(candidate.match_reason)} Score ${candidate.score}</p>
-          <p>${formatDuration(candidate.duration)} / ${escapeHtml(candidate.douyin_aweme_id)}</p>
-          <div class="vd-button-row">
-            <button data-approve-candidate="${candidate.candidate_id}" data-approve-scene="${row.scene.scene_id}" type="button">${candidate.status === "approved" ? "Approved" : "Approve"}</button>
-            <a href="${candidate.stream_url}" target="_blank" rel="noreferrer">Preview stream</a>
-          </div>
-        </div>
-      </article>
-    `).join("");
+    const bySource = {
+      douyinsearch: row.candidates.filter((candidate) => candidate.source !== "pinterestsearch"),
+      pinterestsearch: row.candidates.filter((candidate) => candidate.source === "pinterestsearch"),
+    };
+    board.innerHTML = `
+      <section class="vd-source-section">
+        <h3>Douyin <span>${bySource.douyinsearch.length}</span></h3>
+        <div class="vd-source-grid">${candidateCards(bySource.douyinsearch, row, "douyinsearch")}</div>
+      </section>
+      <section class="vd-source-section">
+        <h3>Pinterest <span>${bySource.pinterestsearch.length}</span></h3>
+        <div class="vd-source-grid">${candidateCards(bySource.pinterestsearch, row, "pinterestsearch")}</div>
+      </section>
+    `;
   }
   board.querySelectorAll("[data-approve-candidate]").forEach((button) => {
     button.addEventListener("click", () => approveCandidate(button.dataset.approveScene, button.dataset.approveCandidate));
@@ -590,6 +602,25 @@ function renderCandidateBoard() {
   board.querySelectorAll("[data-placeholder-scene]").forEach((button) => {
     button.addEventListener("click", () => allowPlaceholder(button.dataset.placeholderScene));
   });
+}
+
+function candidateCards(candidates, row, source) {
+  if (!candidates.length) return `<div class="vd-empty">No ${escapeHtml(sourceLabel(source))} candidates yet.</div>`;
+  return candidates.map((candidate) => `
+    <article class="vd-candidate ${candidate.status === "approved" ? "is-approved" : ""}">
+      <img src="${candidate.cover_url}" alt="">
+      <div>
+        <span class="vd-source-badge">${escapeHtml(sourceLabel(candidate.source))}</span>
+        <h3>${escapeHtml(candidate.title || candidate.source_item_id || candidate.douyin_aweme_id)}</h3>
+        <p>${escapeHtml(candidate.match_reason)} Score ${candidate.score}</p>
+        <p>${formatDuration(candidate.duration)} / ${escapeHtml(candidate.source_item_id || candidate.douyin_aweme_id)}</p>
+        <div class="vd-button-row">
+          <button data-approve-candidate="${candidate.candidate_id}" data-approve-scene="${row.scene.scene_id}" type="button">${candidate.status === "approved" ? "Approved" : "Approve"}</button>
+          <a href="${candidate.stream_url}" target="_blank" rel="noreferrer">Preview stream</a>
+        </div>
+      </div>
+    </article>
+  `).join("");
 }
 
 function renderStudio() {
@@ -1121,7 +1152,11 @@ function hydrateProjectFields(updateInputs = true) {
   document.getElementById("tts-provider").value = state.preset.voiceover.provider || "free_tts";
   document.getElementById("voice-id").value = state.preset.voiceover.voice_id || "en-US-AriaNeural";
   document.getElementById("preset-candidate-count").value = state.preset.scene_media.candidate_count || 4;
+  document.getElementById("preset-pinterest-count").value = state.preset.scene_media.pinterest_candidate_count || 4;
+  document.getElementById("douyin-min-count").value = state.preset.scene_media.candidate_count || 4;
+  document.getElementById("pinterest-min-count").value = state.preset.scene_media.pinterest_candidate_count || 4;
   document.getElementById("preset-translate").checked = Boolean(state.preset.scene_media.translate_to_chinese);
+  document.getElementById("translate-query").checked = Boolean(state.preset.scene_media.translate_to_chinese);
 }
 
 function updateDurationLabel() {
@@ -1256,7 +1291,7 @@ function defaultPreset() {
   return {
     format: { aspect_ratio: "9:16", platform: "tiktok", target_duration_seconds: 45 },
     template: { template_id: "short_form_editor", template_category: "timeline_template", scene_pacing: "normal" },
-    scene_media: { media_source: "douyin_stock", candidate_count: 4, translate_to_chinese: true },
+    scene_media: { media_source: "multi_source", candidate_count: 4, pinterest_candidate_count: 4, translate_to_chinese: true },
     voiceover: { provider: "free_tts", voice_id: "en-US-AriaNeural", language: "en" },
     captions: { enabled: true, style_id: "bold_outline", position: "bottom_safe", animation_id: "word_reveal" },
     extras: { transition_pack_id: "clean_cut", overlay_pack_id: "caption_shadow", icon_pack_id: "none" },
@@ -1338,9 +1373,17 @@ function itemLabel(item) {
 function mediaLabel(value) {
   return {
     douyin_stock: "Douyin stock",
+    multi_source: "Douyin + Pinterest",
     uploads: "Uploads",
     placeholder: "Placeholder",
   }[value] || value;
+}
+
+function sourceLabel(value) {
+  return {
+    douyinsearch: "Douyin",
+    pinterestsearch: "Pinterest",
+  }[value] || "Source";
 }
 
 function textForItem(item) {

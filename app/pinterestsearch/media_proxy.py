@@ -72,6 +72,14 @@ class MediaProxy:
         filename = self._download_filename(result)
         return FileResponse(output_path, media_type="video/mp4", filename=filename)
 
+    async def download_to_file(self, result: PinterestResult, output_path: Path):
+        media_url = result.media_remote_url
+        if result.media_type != "video" or not media_url:
+            raise PinterestSearchError(NETWORK_ERROR, "Pinterest video URL is missing.", retryable=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        await self._write_mp4(media_url, output_path)
+        return output_path
+
     async def _proxy_url(self, url: str, range_header: str | None = None, result_id: str | None = None):
         if not url:
             raise PinterestSearchError(NETWORK_ERROR, "Pinterest media URL is missing.", retryable=True)

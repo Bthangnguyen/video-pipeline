@@ -1322,8 +1322,41 @@ textarea {
 
 .vd-candidate-board {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 14px;
+}
+
+.vd-source-section {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.vd-source-section h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0;
+  color: #17212f;
+  font-size: 16px;
+}
+
+.vd-source-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.vd-source-badge {
+  display: inline-flex;
+  margin-bottom: 6px;
+  border: 1px solid #d8cfcc;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #fff8f6;
+  color: #5c6470;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .vd-candidate {

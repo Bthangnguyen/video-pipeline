@@ -4,7 +4,7 @@ This repository currently implements `douyinsearch`, standalone `pinterestsearch
 
 The module searches Douyin by keyword using cookies and Playwright, returns normalized video results, and exposes backend stream/proxy endpoints so results can be previewed directly in a web UI.
 
-`videodesign` now has a linear web workflow for project creation, DeepSeek script generation, natural scene planning, English TTS timing/audio generation, Douyin video matching with progress updates, pre-studio approval, approved-video download, persisted project JSON, and a studio timeline preview that plays downloaded local material assets.
+`videodesign` now has a linear web workflow for project creation, DeepSeek script generation, natural scene planning, English TTS timing/audio generation, Douyin/Pinterest video matching with progress updates, pre-studio approval, approved-video download, persisted project JSON, and a studio timeline preview that plays downloaded local material assets.
 
 ## Current Goal
 
@@ -17,6 +17,8 @@ Build the video pipeline as small modules that can be developed and tested indep
 - `/videodesign` is the second module UI.
 - VideoDesign projects are stored under `storage/videodesign/{project_id}/project.json`.
 - Scene planning parses scripts by natural sentence/line breaks first. `max_words_per_scene` is only a soft safety limit for overlong sentences.
+- Material search can request separate minimum candidate counts for Douyin and Pinterest per scene.
+- Optional smart keyword search uses DeepSeek to turn each scene into broader stock-video queries that avoid exact dialogue fragments.
 - `timing_only` TTS is a fast test mode that creates silent audio plus estimated caption timing.
 - `free_tts` uses `edge-tts` for a real English voice path.
 - Studio preview shows downloaded media, captions/text overlays, layer tracks, and timeline JSON.

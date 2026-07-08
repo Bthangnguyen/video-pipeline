@@ -177,10 +177,11 @@
             </section>
 
             <section class="vd-panel">
-              <p class="vd-kicker">Douyin search</p>
+              <p class="vd-kicker">Search sources</p>
               <h2>Material search settings</h2>
               <div class="vd-script-tools">
-                <label>Candidates per scene <input id="preset-candidate-count" type="number" min="1" max="10" value="4"></label>
+                <label>Douyin min <input id="preset-candidate-count" type="number" min="0" max="10" value="4"></label>
+                <label>Pinterest min <input id="preset-pinterest-count" type="number" min="0" max="10" value="4"></label>
                 <label><input id="preset-translate" type="checkbox" checked> Translate query to Chinese</label>
               </div>
             </section>
@@ -244,8 +245,10 @@
           <aside class="vd-search-panel">
             <h3>Search this scene</h3>
             <input id="manual-keyword" placeholder="Manual keyword">
-            <label>Candidates <input id="candidate-count" type="number" min="1" max="10" value="4"></label>
+            <label>Douyin min <input id="douyin-min-count" type="number" min="0" max="10" value="4"></label>
+            <label>Pinterest min <input id="pinterest-min-count" type="number" min="0" max="10" value="4"></label>
             <label><input id="translate-query" type="checkbox" checked> Translate</label>
+            <label><input id="smart-keywords" type="checkbox" checked> Smart keywords</label>
             <button id="search-current-scene" class="vd-primary" type="button">Search scene</button>
             <button id="search-all-scenes" type="button">Search all</button>
             <div id="search-progress" class="vd-progress-log"></div>

@@ -61,6 +61,7 @@ class DouyinSearchTask(BaseModel):
     search_task_id: str
     project_id: str
     scene_id: str
+    source: str = "douyinsearch"
     keyword: str
     translate_to_chinese: bool = True
     limit: int = 12
@@ -74,8 +75,10 @@ class MediaCandidate(BaseModel):
     candidate_id: str
     source: str = "douyinsearch"
     scene_id: str
-    douyin_result_id: str
-    douyin_aweme_id: str
+    source_result_id: str = ""
+    source_item_id: str = ""
+    douyin_result_id: str = ""
+    douyin_aweme_id: str = ""
     title: str = ""
     cover_url: str = ""
     stream_url: str = ""
@@ -92,8 +95,10 @@ class MaterialAsset(BaseModel):
     scene_id: str
     candidate_id: str
     source: str = "douyinsearch"
-    douyin_result_id: str
-    douyin_aweme_id: str
+    source_result_id: str = ""
+    source_item_id: str = ""
+    douyin_result_id: str = ""
+    douyin_aweme_id: str = ""
     local_path: str
     media_type: str = "video/mp4"
     duration: float = 0
@@ -185,8 +190,11 @@ class TTSGenerateRequest(BaseModel):
 class MaterialsSearchRequest(BaseModel):
     scene_ids: list[str] | None = None
     candidates_per_scene: int = Field(default=5, ge=1, le=10)
+    douyin_min_per_scene: int | None = Field(default=None, ge=0, le=10)
+    pinterest_min_per_scene: int = Field(default=0, ge=0, le=10)
     queries_per_scene: int = Field(default=2, ge=1, le=3)
     translate_to_chinese: bool = True
+    use_smart_keywords: bool = False
 
 
 class SceneSelectionRequest(BaseModel):
