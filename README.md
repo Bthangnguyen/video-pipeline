@@ -1,6 +1,6 @@
 # Video Pipeline Specs
 
-This repository currently implements `douyinsearch` and the playable V1 slice of `videodesign`.
+This repository currently implements `douyinsearch`, standalone `pinterestsearch`, and the playable V1 slice of `videodesign`.
 
 The module searches Douyin by keyword using cookies and Playwright, returns normalized video results, and exposes backend stream/proxy endpoints so results can be previewed directly in a web UI.
 
@@ -13,6 +13,7 @@ Build the video pipeline as small modules that can be developed and tested indep
 ## Current State
 
 - `douyinsearch` is the source video module.
+- `pinterestsearch` is a standalone source module for Pinterest image/video search with cookie-based Playwright access.
 - `/videodesign` is the second module UI.
 - VideoDesign projects are stored under `storage/videodesign/{project_id}/project.json`.
 - Scene planning parses scripts by natural sentence/line breaks first. `max_words_per_scene` is only a soft safety limit for overlong sentences.
@@ -38,6 +39,27 @@ Build the video pipeline as small modules that can be developed and tested indep
 - Stream video through the backend for browser preview.
 - Download selected search results as no-watermark MP4 when Douyin exposes a resolvable media URL.
 - Report typed errors for cookie, captcha, network, and parsing failures.
+
+## Pinterest Search Module
+
+`pinterestsearch` is intentionally separate from Studio for now. It can validate cookies, search Pinterest by keyword, filter by media type and aspect ratio, and proxy the selected media through backend endpoints.
+
+Default cookie path:
+
+```bash
+PINTEREST_COOKIE_FILE=D:\Workspaces\automation videos\pinterest.txt
+```
+
+Main endpoints:
+
+- `GET /api/pinterest/health`
+- `POST /api/pinterest/session/check`
+- `POST /api/pinterest/search`
+- `GET /api/pinterest/results/{result_id}`
+- `GET /api/pinterest/results/{result_id}/cover`
+- `GET /api/pinterest/results/{result_id}/media`
+
+Search accepts `media_type=image|video|both` and `aspect_ratio=9:16|1:1|16:9|any`. For vertical video sourcing, use `media_type=video` and `aspect_ratio=9:16`.
 
 ## Non-Goals For Current V1
 
