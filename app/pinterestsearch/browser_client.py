@@ -143,32 +143,48 @@ class BrowserClient:
             await page.wait_for_timeout(700)
 
     async def _extract_dom_cards(self, page) -> list[dict]:
-        return await page.evaluate(
-            """
-            () => Array.from(document.querySelectorAll('a[href*="/pin/"]')).slice(0, 160).map((a) => {
-                const root = a.closest('[data-test-id], [role="listitem"], div') || a;
-                const img = root.querySelector('img') || a.querySelector('img');
-                const video = root.querySelector('video') || a.querySelector('video');
-                const source = video?.querySelector('source');
-                const mediaRect = (video || img || root).getBoundingClientRect();
-                const title = a.getAttribute('aria-label') || img?.alt || root.innerText || '';
-                const profile = root.querySelector('a[href*="/"]');
-                return {
-                    href: a.href,
-                    pin_id: (a.href.match(/\\/pin\\/(\\d+)/) || [])[1] || '',
-                    title,
-                    description: img?.alt || '',
-                    image_url: img?.currentSrc || img?.src || '',
-                    video_url: video?.currentSrc || video?.src || source?.src || '',
-                    video_poster: video?.poster || '',
-                    width: video?.videoWidth || img?.naturalWidth || img?.width || Math.round(mediaRect.width) || 0,
-                    height: video?.videoHeight || img?.naturalHeight || img?.height || Math.round(mediaRect.height) || 0,
-                    author_name: profile?.innerText || '',
-                    author_url: profile?.href || ''
-                };
-            })
-            """
-        )
+        last_error = None
+        for _ in range(3):
+            try:
+                return await page.evaluate(
+                    """
+                    () => Array.from(document.querySelectorAll('a[href*="/pin/"]')).slice(0, 160).map((a) => {
+                        const root = a.closest('[data-test-id], [role="listitem"], div') || a;
+                        const img = root.querySelector('img') || a.querySelector('img');
+                        const video = root.querySelector('video') || a.querySelector('video');
+                        const source = video?.querySelector('source');
+                        const mediaRect = (video || img || root).getBoundingClientRect();
+                        const title = a.getAttribute('aria-label') || img?.alt || root.innerText || '';
+                        const profile = root.querySelector('a[href*="/"]');
+                        return {
+                            href: a.href,
+                            pin_id: (a.href.match(/\\/pin\\/(\\d+)/) || [])[1] || '',
+                            title,
+                            description: img?.alt || '',
+                            image_url: img?.currentSrc || img?.src || '',
+                            video_url: video?.currentSrc || video?.src || source?.src || '',
+                            video_poster: video?.poster || '',
+                            width: video?.videoWidth || img?.naturalWidth || img?.width || Math.round(mediaRect.width) || 0,
+                            height: video?.videoHeight || img?.naturalHeight || img?.height || Math.round(mediaRect.height) || 0,
+                            author_name: profile?.innerText || '',
+                            author_url: profile?.href || ''
+                        };
+                    })
+                    """
+                )
+            except Exception as exc:
+                last_error = exc
+                message = str(exc).lower()
+                if "execution context was destroyed" not in message and "navigation" not in message:
+                    raise
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(800)
+        if last_error:
+            raise last_error
+        return []
 
     def _session_message(self, state: str) -> str:
         return {
