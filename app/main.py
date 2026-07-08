@@ -43,3 +43,11 @@ async def videodesign_index():
     if index_path.exists():
         return FileResponse(index_path)
     return {"module": "videodesign", "docs": "/docs"}
+
+
+@app.get("/pinterestsearch")
+async def pinterestsearch_index():
+    index_path = static_dir / "pinterestsearch.html"
+    if index_path.exists():
+        return FileResponse(index_path)
+    return {"module": "pinterestsearch", "docs": "/docs"}

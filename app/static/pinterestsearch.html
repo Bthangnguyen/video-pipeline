@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PinterestSearch</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>PinterestSearch</h1>
+      <a class="nav-link" href="/">Douyin Search</a>
+      <a class="nav-link" href="/videodesign">Video Design</a>
+      <button id="session-check" type="button">Check Session</button>
+      <span id="session-state"></span>
+    </header>
+
+    <section class="searchbar">
+      <input id="keyword" placeholder="Search keyword" autocomplete="off" value="cat video">
+      <select id="media-type" aria-label="Media type">
+        <option value="video" selected>Video</option>
+        <option value="image">Image</option>
+        <option value="both">Both</option>
+      </select>
+      <select id="aspect-ratio" aria-label="Aspect ratio">
+        <option value="9:16" selected>9:16</option>
+        <option value="1:1">1:1</option>
+        <option value="16:9">16:9</option>
+        <option value="any">Any</option>
+      </select>
+      <input id="limit" type="number" min="1" max="60" value="12" aria-label="Limit">
+      <button id="search" type="button">Search</button>
+    </section>
+
+    <p id="message"></p>
+    <section id="results" class="results"></section>
+  </main>
+  <script src="/static/pinterestsearch.js"></script>
+</body>
+</html>
