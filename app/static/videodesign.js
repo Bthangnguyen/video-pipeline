@@ -10,6 +10,7 @@ const state = {
   timelineFit: true,
   timelinePixelsPerSecond: 48,
   timelinePlayheadSeconds: 0,
+  timelinePlaying: false,
   running: false,
   lastProgressMessage: "",
   preset: defaultPreset(),
@@ -96,8 +97,9 @@ function bindEvents() {
 
   document.getElementById("create-timeline").addEventListener("click", createTimeline);
   document.getElementById("studio-play").addEventListener("click", toggleStudioPlayback);
-  document.getElementById("studio-video").addEventListener("timeupdate", updateStudioClock);
+  document.getElementById("studio-video").addEventListener("timeupdate", onStudioVideoTimeUpdate);
   document.getElementById("studio-video").addEventListener("loadedmetadata", updateStudioClock);
+  document.getElementById("studio-video").addEventListener("ended", onStudioVideoEnded);
   document.getElementById("studio-video").addEventListener("play", updateStudioPlaybackButton);
   document.getElementById("studio-video").addEventListener("pause", updateStudioPlaybackButton);
   document.getElementById("timeline-fit").addEventListener("click", fitTimeline);
@@ -646,6 +648,7 @@ function renderStudioStage() {
   const sceneLabel = document.getElementById("studio-scene-label");
   const mediaState = document.getElementById("studio-media-state");
 
+  video.muted = true;
   if (media?.source_ref?.media_url && video.getAttribute("src") !== media.source_ref.media_url) {
     video.src = media.source_ref.media_url;
     video.load();
@@ -685,6 +688,7 @@ function renderStudioInspector() {
     ${summaryRow("Selected", item ? itemLabel(item) : "None")}
     ${summaryRow("Start", item ? formatDuration(item.start_seconds) : "0:00")}
     ${summaryRow("End", item ? formatDuration(item.end_seconds) : "0:00")}
+    ${item?.type === "media" ? summaryRow("Source trim", `${formatDuration(mediaTrimStart(item))} - ${formatDuration(mediaTrimEnd(item))}`) : ""}
     ${summaryRow("Text style", captionLabel(state.preset.captions.style_id))}
     ${summaryRow("Transition", transitionLabel(state.preset.extras.transition_pack_id))}
     ${summaryRow("Overlay", overlayLabel(state.preset.extras.overlay_pack_id))}
@@ -824,10 +828,10 @@ function seekTimelineFromPointer(event) {
   const metrics = timelineMetrics();
   const rect = board.getBoundingClientRect();
   const x = event.clientX - rect.left + board.scrollLeft - metrics.labelWidth;
-  seekTimeline(clamp(x / metrics.pxPerSecond, 0, metrics.duration));
+  seekTimeline(clamp(x / metrics.pxPerSecond, 0, metrics.duration), { autoplay: state.timelinePlaying });
 }
 
-function seekTimeline(globalTime) {
+function seekTimeline(globalTime, options = {}) {
   if (!state.timeline) return;
   const duration = Math.max(1, state.timeline.duration_seconds || 1);
   const time = clamp(Number(globalTime || 0), 0, duration);
@@ -839,7 +843,7 @@ function seekTimeline(globalTime) {
       state.selectedItemId = media.item_id;
     }
     renderStudio();
-    syncStudioVideoToTimeline(time);
+    syncStudioVideoToTimeline(time, options);
     return;
   }
   updateStudioClock(time);
@@ -853,21 +857,58 @@ function mediaItemAtTime(time) {
     || null;
 }
 
-function syncStudioVideoToTimeline(globalTime) {
+function syncStudioVideoToTimeline(globalTime, options = {}) {
   const video = document.getElementById("studio-video");
-  const media = timelineItems().find((item) => item.type === "media" && item.scene_id === selectedRow()?.scene.scene_id);
+  const media = currentMediaItem();
   if (!video || !media) return;
-  const localTime = clamp(globalTime - media.start_seconds, 0, Math.max(0, media.end_seconds - media.start_seconds));
+  const localTime = mediaTrimStart(media) + clamp(globalTime - media.start_seconds, 0, Math.max(0, media.end_seconds - media.start_seconds));
+  const targetVideoTime = clamp(localTime, mediaTrimStart(media), mediaTrimEnd(media));
   const setTime = () => {
     try {
-      video.currentTime = localTime;
+      video.currentTime = targetVideoTime;
     } catch {
       return;
     }
-    updateStudioClock();
+    updateStudioClock(globalTime);
+    if (options.autoplay) playStudioVideo();
   };
   if (video.readyState > 0) setTime();
   else video.addEventListener("loadedmetadata", setTime, { once: true });
+}
+
+function playStudioVideo() {
+  const video = document.getElementById("studio-video");
+  if (!video?.src) {
+    state.timelinePlaying = false;
+    updateStudioPlaybackButton();
+    return;
+  }
+  const promise = video.play();
+  if (promise?.catch) {
+    promise.catch(() => {
+      state.timelinePlaying = false;
+      updateStudioPlaybackButton();
+    });
+  }
+}
+
+function currentMediaItem() {
+  return timelineItems().find((item) => item.type === "media" && item.scene_id === selectedRow()?.scene.scene_id) || null;
+}
+
+function globalTimeFromVideo(media = currentMediaItem(), video = document.getElementById("studio-video")) {
+  if (!media) return state.timelinePlayheadSeconds || 0;
+  const localElapsed = Math.max(0, Number(video?.currentTime || 0) - mediaTrimStart(media));
+  return (media.start_seconds || 0) + localElapsed;
+}
+
+function mediaTrimStart(item) {
+  return Number(item?.source_ref?.trim_start_seconds || 0);
+}
+
+function mediaTrimEnd(item) {
+  const fallback = mediaTrimStart(item) + Math.max(0, (item?.end_seconds || 0) - (item?.start_seconds || 0));
+  return Number(item?.source_ref?.trim_end_seconds || fallback);
 }
 
 function placeTimelineClip(clip, item) {
@@ -1120,17 +1161,65 @@ function timelineItems() {
 
 function toggleStudioPlayback() {
   const video = document.getElementById("studio-video");
-  if (!video.src) return;
-  if (video.paused) video.play();
-  else video.pause();
+  if (!state.timeline) {
+    if (!video.src) return;
+    if (video.paused) video.play();
+    else video.pause();
+    return;
+  }
+  if (state.timelinePlaying) {
+    state.timelinePlaying = false;
+    video.pause();
+    updateStudioPlaybackButton();
+    return;
+  }
+  const duration = Math.max(1, state.timeline.duration_seconds || 1);
+  const startTime = state.timelinePlayheadSeconds >= duration ? 0 : state.timelinePlayheadSeconds;
+  playTimelineFrom(startTime);
+}
+
+function playTimelineFrom(globalTime) {
+  state.timelinePlaying = true;
+  seekTimeline(globalTime, { autoplay: true });
+  updateStudioPlaybackButton();
+}
+
+function onStudioVideoTimeUpdate() {
+  updateStudioClock();
+  if (!state.timelinePlaying) return;
+  const media = currentMediaItem();
+  if (!media) return;
+  const video = document.getElementById("studio-video");
+  const globalTime = globalTimeFromVideo(media, video);
+  if (globalTime >= media.end_seconds - 0.05 || Number(video.currentTime || 0) >= mediaTrimEnd(media) - 0.05) {
+    advanceTimelinePlayback(media.end_seconds + 0.001);
+  }
+}
+
+function onStudioVideoEnded() {
+  if (!state.timelinePlaying) return;
+  const media = currentMediaItem();
+  if (!media) return;
+  advanceTimelinePlayback(media.end_seconds + 0.001);
+}
+
+function advanceTimelinePlayback(globalTime) {
+  if (!state.timeline) return;
+  const duration = Math.max(1, state.timeline.duration_seconds || 1);
+  if (globalTime >= duration - 0.01) {
+    state.timelinePlaying = false;
+    document.getElementById("studio-video").pause();
+    seekTimeline(duration);
+    updateStudioPlaybackButton();
+    return;
+  }
+  seekTimeline(globalTime, { autoplay: true });
 }
 
 function updateStudioClock(forcedGlobalTime = null) {
-  const video = document.getElementById("studio-video");
-  const media = timelineItems().find((item) => item.type === "media" && item.scene_id === selectedRow()?.scene.scene_id);
+  const media = currentMediaItem();
   const hasForcedTime = typeof forcedGlobalTime === "number" && Number.isFinite(forcedGlobalTime);
-  const localTime = Number(video?.currentTime || 0);
-  const globalTime = hasForcedTime ? forcedGlobalTime : (media?.start_seconds || 0) + localTime;
+  const globalTime = hasForcedTime ? forcedGlobalTime : globalTimeFromVideo(media);
   state.timelinePlayheadSeconds = clamp(globalTime, 0, Math.max(1, state.timeline?.duration_seconds || 1));
   const time = document.getElementById("studio-time");
   if (time) time.textContent = state.timeline ? `${formatDuration(state.timelinePlayheadSeconds)} / ${formatDuration(state.timeline.duration_seconds)}` : "0:00";
@@ -1150,7 +1239,7 @@ function updateStudioPlaybackButton() {
   const video = document.getElementById("studio-video");
   const button = document.getElementById("studio-play");
   if (!button || !video) return;
-  button.textContent = video.paused ? "Play" : "Pause";
+  button.textContent = state.timelinePlaying || !video.paused ? "Pause" : "Play";
 }
 
 function ensureProject() {

@@ -344,9 +344,10 @@ class VideoDesignService:
                 continue
             if not scene.material_asset_id:
                 raise VideoDesignError(SCENE_NOT_READY, f"Scene {scene.scene_id} must be downloaded before studio.")
+            asset = _asset(project, scene.material_asset_id)
             duration = scene.duration_seconds or estimate_duration(scene.voiceover_text)
             end = round(current + duration, 2)
-            items.extend(_timeline_items_for_scene(project.project_id, scene, current, end, project.design_preset))
+            items.extend(_timeline_items_for_scene(project.project_id, scene, asset, current, end, project.design_preset))
             if index < len(renderable_scenes) - 1:
                 items.append(_transition_item_for_scene(scene, end, project.design_preset))
             current = end
@@ -482,10 +483,12 @@ def _score_candidate(scene: ScenePlan, title: str, duration: float) -> float:
     return round(min(1.0, 0.55 + keyword_hits * 0.08) * duration_fit, 2)
 
 
-def _timeline_items_for_scene(project_id: str, scene: ScenePlan, start: float, end: float, preset: dict | None = None) -> list[TimelineItem]:
+def _timeline_items_for_scene(project_id: str, scene: ScenePlan, asset: MaterialAsset, start: float, end: float, preset: dict | None = None) -> list[TimelineItem]:
     duration = end - start
     extras = (preset or {}).get("extras", {})
     overlay_pack_id = extras.get("overlay_pack_id") or "caption_shadow"
+    asset_duration = max(0.0, float(asset.duration or 0))
+    trim_end = round(min(asset_duration or duration, duration), 2)
     items = [
         TimelineItem(
             item_id=f"itm_{uuid.uuid4().hex}",
@@ -498,6 +501,11 @@ def _timeline_items_for_scene(project_id: str, scene: ScenePlan, start: float, e
                 "source": "material_asset",
                 "asset_id": scene.material_asset_id,
                 "media_url": f"/api/videodesign/projects/{project_id}/materials/{scene.material_asset_id}/file",
+                "asset_duration_seconds": asset_duration,
+                "timeline_duration_seconds": round(duration, 2),
+                "trim_start_seconds": 0.0,
+                "trim_end_seconds": trim_end,
+                "cut_strategy": "scene_duration_from_start",
             },
             transform={"fit": "cover", "x": 50, "y": 50, "scale": 1, "rotation": 0},
         ),
