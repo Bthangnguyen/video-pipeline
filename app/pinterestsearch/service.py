@@ -46,8 +46,8 @@ class PinterestSearchService:
         result = self._stored_result(result_id)
         return {"success": True, "item": self._public_result(result)}
 
-    async def proxy_media(self, result_id: str, range_header: str | None = None):
-        return await self.media_proxy.proxy_media(self._stored_result(result_id), range_header)
+    async def proxy_media(self, result_id: str, range_header: str | None = None, url: str | None = None):
+        return await self.media_proxy.proxy_media(self._stored_result(result_id), range_header, url)
 
     async def proxy_cover(self, result_id: str):
         return await self.media_proxy.proxy_cover(self._stored_result(result_id))

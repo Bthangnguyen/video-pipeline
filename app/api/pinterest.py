@@ -51,8 +51,8 @@ async def cover(result_id: str):
 
 
 @router.get("/results/{result_id}/media")
-async def media(result_id: str, request: Request):
+async def media(result_id: str, request: Request, url: str | None = None):
     try:
-        return await pinterest_service.proxy_media(result_id, request.headers.get("range"))
+        return await pinterest_service.proxy_media(result_id, request.headers.get("range"), url)
     except PinterestSearchError as error:
         return error_response(error)

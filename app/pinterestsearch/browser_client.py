@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from urllib.parse import quote
 
@@ -9,7 +10,7 @@ from app.pinterestsearch.errors import (
     MISSING_COOKIE_FILE,
     PinterestSearchError,
 )
-from app.pinterestsearch.parser import parse_dom_cards
+from app.pinterestsearch.parser import parse_api_payloads, parse_dom_cards
 from app.pinterestsearch.schemas import PinterestResult, SearchRequest
 
 
@@ -53,8 +54,17 @@ class BrowserClient:
         try:
             state = "valid"
             results: list[PinterestResult] = []
+            attempts: list[dict] = []
             paths = self._search_paths(request.keyword, request.media_type)
             for index, url in enumerate(paths, start=1):
+                payloads: list[dict] = []
+                pending_payloads: list[asyncio.Task] = []
+
+                def on_response(response):
+                    if "BaseSearchResource/get" in response.url:
+                        pending_payloads.append(asyncio.create_task(self._capture_json_response(response, payloads)))
+
+                page.on("response", on_response)
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 await page.wait_for_timeout(2500)
                 state = await self._detect_page_state(page)
@@ -64,23 +74,52 @@ class BrowserClient:
                     raise PinterestSearchError(LOGIN_REQUIRED, "Pinterest login is required or cookies are expired.")
 
                 await self._scroll_for_results(page)
+                await page.wait_for_timeout(1000)
+                if pending_payloads:
+                    await asyncio.gather(*pending_payloads, return_exceptions=True)
                 cards = await self._extract_dom_cards(page)
-                results = parse_dom_cards(
+                api_results = parse_api_payloads(
+                    payloads,
+                    request.limit,
+                    request.media_type,
+                    request.aspect_ratio,
+                    request.aspect_tolerance,
+                )
+                dom_results = parse_dom_cards(
                     cards,
                     request.limit,
                     request.media_type,
                     request.aspect_ratio,
                     request.aspect_tolerance,
                 )
-                if results:
+                results = self._merge_results(results, api_results, dom_results)
+                attempts.append(
+                    {
+                        "url": url,
+                        "api_payloads": len(payloads),
+                        "api_results": len(api_results),
+                        "dom_cards_extracted": len(cards),
+                        "dom_results": len(dom_results),
+                    }
+                )
+                page.remove_listener("response", on_response)
+                if len(results) >= request.limit:
                     return results, {
                         "browser_search_url": url,
                         "search_attempt": index,
-                        "cards_extracted": len(cards),
+                        "cards_extracted": sum(attempt["dom_cards_extracted"] for attempt in attempts),
+                        "api_payloads": sum(attempt["api_payloads"] for attempt in attempts),
                         "state": state,
+                        "attempts": attempts,
                     }
 
-            return [], {"cards_extracted": 0, "state": state, "search_urls": paths}
+            return results, {
+                "cards_extracted": sum(attempt["dom_cards_extracted"] for attempt in attempts),
+                "api_payloads": sum(attempt["api_payloads"] for attempt in attempts),
+                "state": state,
+                "search_urls": paths,
+                "attempts": attempts,
+            }
         except PinterestSearchError:
             raise
         except Exception as exc:
@@ -129,13 +168,22 @@ class BrowserClient:
         return "valid"
 
     def _search_paths(self, keyword: str, media_type: str) -> list[str]:
-        query = quote(keyword.strip())
+        queries = self._query_variants(keyword, media_type)
+        urls: list[str] = []
         if media_type == "video":
-            return [
-                f"https://www.pinterest.com/search/videos/?q={query}",
-                f"https://www.pinterest.com/search/pins/?q={query}",
-            ]
-        return [f"https://www.pinterest.com/search/pins/?q={query}"]
+            urls.extend(f"https://www.pinterest.com/search/videos/?q={quote(query)}&rs=typed" for query in queries)
+        urls.extend(f"https://www.pinterest.com/search/pins/?q={quote(query)}&rs=typed" for query in queries)
+        return list(dict.fromkeys(urls))
+
+    def _query_variants(self, keyword: str, media_type: str) -> list[str]:
+        query = " ".join(keyword.strip().split())
+        variants = [query] if query else []
+        if media_type in {"video", "image"}:
+            generic_tokens = {"video", "videos"} if media_type == "video" else {"image", "images", "photo", "photos"}
+            cleaned = " ".join(token for token in query.split() if token.lower() not in generic_tokens).strip()
+            if cleaned and cleaned not in variants:
+                variants.append(cleaned)
+        return variants
 
     async def _scroll_for_results(self, page) -> None:
         for _ in range(4):
@@ -185,6 +233,28 @@ class BrowserClient:
         if last_error:
             raise last_error
         return []
+
+    async def _capture_json_response(self, response, payloads: list[dict]) -> None:
+        try:
+            payloads.append(await response.json())
+        except Exception:
+            return
+
+    def _merge_results(
+        self,
+        current: list[PinterestResult],
+        api_results: list[PinterestResult],
+        dom_results: list[PinterestResult],
+    ) -> list[PinterestResult]:
+        merged: list[PinterestResult] = []
+        seen: set[str] = set()
+        for result in [*current, *api_results, *dom_results]:
+            key = result.pin_id or result.media_remote_url or result.cover_remote_url
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(result)
+        return merged
 
     def _session_message(self, state: str) -> str:
         return {
