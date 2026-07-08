@@ -2240,6 +2240,51 @@ textarea {
   color: #3ce6ac;
 }
 
+.vd-media-status,
+.vd-trim-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0;
+  color: #8391a8;
+  font-size: 12px;
+}
+
+.vd-media-status strong,
+.vd-trim-meta b {
+  color: #f6f8fb;
+}
+
+.vd-media-status span {
+  padding: 4px 8px;
+  border: 1px solid rgba(60, 230, 172, 0.22);
+  border-radius: 999px;
+  color: #3ce6ac;
+}
+
+.vd-trim-video {
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  max-height: 260px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: #050507;
+  object-fit: contain;
+}
+
+.vd-media-adjustments {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.vd-media-adjustments label,
+.vd-studio-panel label {
+  display: grid;
+  gap: 5px;
+}
+
 @media (max-width: 1120px) {
   .vd-start,
   .vd-two-column,

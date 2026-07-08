@@ -41,6 +41,8 @@ from app.videodesign.schemas import (
     MaterialsSearchRequest,
     MaterialAsset,
     MediaCandidate,
+    SceneClip,
+    SceneClipPatch,
     ScenePlan,
     SceneSelectionRequest,
     ScriptGenerateRequest,
@@ -205,6 +207,23 @@ class VideoDesignService:
         self.store.put(project)
         return {"success": True, "scene": scene.model_dump()}
 
+    def update_scene_clip(self, project_id: str, scene_id: str, request: SceneClipPatch) -> dict:
+        project = self.store.get(project_id)
+        scene = _scene(project, scene_id)
+        asset_id = request.material_asset_id or scene.material_asset_id
+        if not asset_id:
+            raise VideoDesignError(SCENE_NOT_READY, "Scene must have downloaded material before selecting a clip.")
+        asset = _asset(project, asset_id)
+        if asset.scene_id != scene.scene_id:
+            raise VideoDesignError(SCENE_NOT_READY, "Material asset does not belong to this scene.")
+        if request.asset_duration_seconds is not None:
+            asset.duration = round(float(request.asset_duration_seconds), 2)
+        duration = _scene_duration(scene)
+        scene.clip = _make_scene_clip(scene, asset, duration, request)
+        _sync_scene_clip_to_timeline(project, scene, asset)
+        self.store.put(project)
+        return {"success": True, "scene": scene.model_dump(), "timeline": project.timeline.model_dump() if project.timeline else None}
+
     def split_scene(self, project_id: str, scene_id: str) -> dict:
         project = self.store.get(project_id)
         scene = _scene(project, scene_id)
@@ -243,7 +262,10 @@ class VideoDesignService:
         for scene in scenes:
             text = scene.tts_text or scene.voiceover_text
             result = await self.tts_client.generate(text, project.project_id, scene.scene_id, provider, voice_id)
+            previous_duration = scene.duration_seconds
             scene.duration_seconds = result.duration_seconds
+            if scene.clip and previous_duration and abs(scene.clip.duration_seconds - result.duration_seconds) > 0.05:
+                scene.clip.status = "trim_stale"
             scene.caption_chunks = result.caption_chunks
             scene.tts = TTSMeta(
                 provider=provider,
@@ -557,6 +579,7 @@ class VideoDesignService:
             )
             project.material_assets.append(asset)
             scene.material_asset_id = asset.asset_id
+            scene.clip = None
             scene.approval_state = "downloaded"
             downloaded.append(asset.model_dump())
         self.store.put(project)
@@ -703,7 +726,9 @@ class VideoDesignService:
             if not scene.material_asset_id:
                 raise VideoDesignError(SCENE_NOT_READY, f"Scene {scene.scene_id} must be downloaded before studio.")
             asset = _asset(project, scene.material_asset_id)
-            duration = scene.duration_seconds or estimate_duration(scene.voiceover_text)
+            duration = _scene_duration(scene)
+            if not scene.clip or scene.clip.material_asset_id != asset.asset_id:
+                scene.clip = _make_scene_clip(scene, asset, duration)
             end = round(current + duration, 2)
             items.extend(_timeline_items_for_scene(project.project_id, scene, asset, current, end, project.design_preset))
             if index < len(renderable_scenes) - 1:
@@ -983,12 +1008,111 @@ def source_label(source: str) -> str:
     }.get(source, source)
 
 
+def _scene_duration(scene: ScenePlan) -> float:
+    return round(max(0.25, float(scene.duration_seconds or estimate_duration(scene.voiceover_text))), 2)
+
+
+def _make_scene_clip(
+    scene: ScenePlan,
+    asset: MaterialAsset,
+    duration: float,
+    request: SceneClipPatch | None = None,
+) -> SceneClip:
+    existing = scene.clip if scene.clip and scene.clip.material_asset_id == asset.asset_id else None
+    source = request.trim_source if request else "auto_start"
+    requested_start = request.trim_start_seconds if request else 0
+    raw_duration = max(0.0, float(asset.duration or 0))
+    start = max(0.0, float(requested_start or 0))
+    loop_mode = request.loop_mode if request and request.loop_mode is not None else (existing.loop_mode if existing else "none")
+    status = "trim_manual" if source == "manual" else "trim_auto"
+
+    if raw_duration and raw_duration < duration:
+        start = 0.0
+        end = raw_duration
+        loop_mode = loop_mode if loop_mode and loop_mode != "none" else "loop_to_fill"
+        status = "trim_short_loop"
+    elif raw_duration:
+        max_start = max(0.0, raw_duration - duration)
+        start = min(start, max_start)
+        end = start + duration
+    else:
+        end = start + duration
+
+    base = existing or SceneClip(material_asset_id=asset.asset_id)
+    transform = dict(base.transform)
+    effects = dict(base.effects)
+    transition = dict(base.transition)
+    if request:
+        if request.transform is not None:
+            transform.update(request.transform)
+        if request.effects is not None:
+            effects.update(request.effects)
+        if request.transition is not None:
+            transition.update(request.transition)
+
+    return SceneClip(
+        material_asset_id=asset.asset_id,
+        trim_source=source,
+        trim_start_seconds=round(start, 2),
+        trim_end_seconds=round(end, 2),
+        duration_seconds=round(duration, 2),
+        fit=base.fit,
+        loop_mode=loop_mode or "none",
+        status=status,
+        transform=transform,
+        effects=effects,
+        transition=transition,
+    )
+
+
+def _media_source_ref(project_id: str, scene: ScenePlan, asset: MaterialAsset, timeline_duration: float) -> dict:
+    clip = scene.clip or _make_scene_clip(scene, asset, timeline_duration)
+    return {
+        "source": "material_asset",
+        "asset_id": asset.asset_id,
+        "media_url": f"/api/videodesign/projects/{project_id}/materials/{asset.asset_id}/file",
+        "asset_duration_seconds": max(0.0, float(asset.duration or 0)),
+        "timeline_duration_seconds": round(timeline_duration, 2),
+        "trim_source": clip.trim_source,
+        "trim_status": clip.status,
+        "trim_start_seconds": clip.trim_start_seconds,
+        "trim_end_seconds": clip.trim_end_seconds,
+        "loop_mode": clip.loop_mode,
+        "cut_strategy": clip.trim_source,
+        "effects": clip.effects,
+        "transition": clip.transition,
+    }
+
+
+def _media_transform_from_clip(scene: ScenePlan) -> dict:
+    clip = scene.clip
+    transform = clip.transform if clip else {}
+    return {
+        "fit": clip.fit if clip else "cover",
+        "x": transform.get("crop_x", 50),
+        "y": transform.get("crop_y", 50),
+        "scale": transform.get("zoom", 1),
+        "rotation": transform.get("rotation", 0),
+        "flip_horizontal": bool(transform.get("flip_horizontal", False)),
+    }
+
+
+def _sync_scene_clip_to_timeline(project: VideoDesignProject, scene: ScenePlan, asset: MaterialAsset) -> None:
+    if not project.timeline:
+        return
+    for item in project.timeline.items:
+        if item.type != "media" or item.scene_id != scene.scene_id:
+            continue
+        timeline_duration = max(0.25, item.end_seconds - item.start_seconds)
+        item.source_ref = _media_source_ref(project.project_id, scene, asset, timeline_duration)
+        item.transform = _media_transform_from_clip(scene)
+        break
+
+
 def _timeline_items_for_scene(project_id: str, scene: ScenePlan, asset: MaterialAsset, start: float, end: float, preset: dict | None = None) -> list[TimelineItem]:
     duration = end - start
     extras = (preset or {}).get("extras", {})
     overlay_pack_id = extras.get("overlay_pack_id") or "caption_shadow"
-    asset_duration = max(0.0, float(asset.duration or 0))
-    trim_end = round(min(asset_duration or duration, duration), 2)
     items = [
         TimelineItem(
             item_id=f"itm_{uuid.uuid4().hex}",
@@ -997,17 +1121,8 @@ def _timeline_items_for_scene(project_id: str, scene: ScenePlan, asset: Material
             type="media",
             start_seconds=start,
             end_seconds=end,
-            source_ref={
-                "source": "material_asset",
-                "asset_id": scene.material_asset_id,
-                "media_url": f"/api/videodesign/projects/{project_id}/materials/{scene.material_asset_id}/file",
-                "asset_duration_seconds": asset_duration,
-                "timeline_duration_seconds": round(duration, 2),
-                "trim_start_seconds": 0.0,
-                "trim_end_seconds": trim_end,
-                "cut_strategy": "scene_duration_from_start",
-            },
-            transform={"fit": "cover", "x": 50, "y": 50, "scale": 1, "rotation": 0},
+            source_ref=_media_source_ref(project_id, scene, asset, duration),
+            transform=_media_transform_from_clip(scene),
         ),
         TimelineItem(
             item_id=f"itm_{uuid.uuid4().hex}",

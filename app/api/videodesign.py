@@ -11,6 +11,7 @@ from app.videodesign.schemas import (
     MaterialsPreflightRequest,
     MaterialsPruneRequest,
     MaterialsSearchRequest,
+    SceneClipPatch,
     SceneSelectionRequest,
     ScriptGenerateRequest,
     SplitSettings,
@@ -92,6 +93,14 @@ async def plan(project_id: str):
 async def update_scene(project_id: str, scene_id: str, patch: dict = Body(...)):
     try:
         return videodesign_service.update_scene(project_id, scene_id, patch)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.patch("/projects/{project_id}/scenes/{scene_id}/clip")
+async def update_scene_clip(project_id: str, scene_id: str, request: SceneClipPatch):
+    try:
+        return videodesign_service.update_scene_clip(project_id, scene_id, request)
     except VideoDesignError as error:
         return error_response(error)
 

@@ -1028,8 +1028,7 @@ function renderStudioToolPanel() {
     `;
     panel.querySelector("#save-studio-text")?.addEventListener("click", () => saveStudioText());
   } else if (state.selectedTool === "media") {
-    panel.innerHTML = `<h3>Media</h3><p>${row ? `Scene ${row.scene.order}` : "Select a scene"}</p><button data-view-target="materials" type="button">Return to materials</button>`;
-    panel.querySelector("[data-view-target]")?.addEventListener("click", () => navigate("materials"));
+    renderStudioMediaPanel(panel, row);
   } else {
     panel.innerHTML = `<h3>${escapeHtml(titleCase(state.selectedTool))}</h3><p class="vd-muted">Controls for this tool will build on the selected timeline item.</p>`;
   }
@@ -1040,6 +1039,186 @@ function renderStudioToolPanel() {
       renderStudio();
     });
   });
+}
+
+function renderStudioMediaPanel(panel, row) {
+  const media = row ? timelineItems().find((item) => item.type === "media" && item.scene_id === row.scene.scene_id) : null;
+  if (!row) {
+    panel.innerHTML = `<h3>Media</h3><p class="vd-muted">Select a scene.</p>`;
+    return;
+  }
+  if (!media?.source_ref?.media_url) {
+    panel.innerHTML = `
+      <h3>Media</h3>
+      <p class="vd-muted">Scene ${row.scene.order} has no downloaded material in the timeline.</p>
+      <button data-view-target="materials" type="button">Return to materials</button>
+    `;
+    panel.querySelector("[data-view-target]")?.addEventListener("click", () => navigate("materials"));
+    return;
+  }
+
+  const targetDuration = mediaSceneDuration(media, row);
+  const knownAssetDuration = Number(media.source_ref.asset_duration_seconds || 0);
+  const maxStart = Math.max(0, knownAssetDuration - targetDuration);
+  const trimStart = knownAssetDuration ? clamp(mediaTrimStart(media), 0, maxStart) : mediaTrimStart(media);
+  const transform = media.transform || {};
+  const effects = media.source_ref.effects || {};
+  panel.innerHTML = `
+    <h3>Media</h3>
+    <div class="vd-media-status">
+      <strong>Scene ${row.scene.order}</strong>
+      <span>${escapeHtml(trimStatusLabel(media))}</span>
+    </div>
+    <video id="studio-trim-video" class="vd-trim-video" controls playsinline preload="metadata" src="${escapeHtml(media.source_ref.media_url)}"></video>
+    <div class="vd-trim-meta">
+      <span>Voice duration <b>${formatDuration(targetDuration)}</b></span>
+      <span id="studio-trim-asset-duration">Raw ${knownAssetDuration ? formatDuration(knownAssetDuration) : "loading"}</span>
+    </div>
+    <label>Segment start
+      <input id="studio-trim-start" type="range" min="0" max="${maxStart.toFixed(2)}" step="0.05" value="${trimStart.toFixed(2)}">
+    </label>
+    <label>Start seconds
+      <input id="studio-trim-start-number" type="number" min="0" max="${maxStart.toFixed(2)}" step="0.05" value="${trimStart.toFixed(2)}">
+    </label>
+    <div id="studio-trim-window-label" class="vd-muted"></div>
+    <div class="vd-button-row">
+      <button id="preview-trim-segment" type="button">Play segment</button>
+      <button id="save-scene-trim" class="vd-primary" type="button">Confirm segment</button>
+      <button id="auto-scene-trim" type="button">Use auto-start</button>
+    </div>
+    <div class="vd-media-adjustments">
+      <label><input id="trim-flip-horizontal" type="checkbox" ${transform.flip_horizontal ? "checked" : ""}> Flip horizontal</label>
+      <label>Contrast <input id="trim-contrast" type="range" min="0.75" max="1.35" step="0.01" value="${Number(effects.contrast || 1)}"></label>
+      <label>Brightness <input id="trim-brightness" type="range" min="0.75" max="1.25" step="0.01" value="${Number(effects.brightness || 1)}"></label>
+      <label>Saturation <input id="trim-saturation" type="range" min="0.5" max="1.4" step="0.01" value="${Number(effects.saturation || 1)}"></label>
+    </div>
+    <button data-view-target="materials" type="button">Return to materials</button>
+  `;
+  bindStudioMediaPanel(panel, media, row);
+}
+
+function bindStudioMediaPanel(panel, media, row) {
+  const trimVideo = panel.querySelector("#studio-trim-video");
+  const range = panel.querySelector("#studio-trim-start");
+  const number = panel.querySelector("#studio-trim-start-number");
+  const sync = (value = null, seek = true) => {
+    const next = updateTrimControls(panel, media, row, value);
+    if (seek && trimVideo?.readyState > 0) {
+      try {
+        trimVideo.currentTime = next;
+      } catch {
+        return;
+      }
+    }
+  };
+  trimVideo?.addEventListener("loadedmetadata", () => sync(mediaTrimStart(media), false));
+  range?.addEventListener("input", () => sync(Number(range.value || 0)));
+  number?.addEventListener("change", () => sync(Number(number.value || 0)));
+  panel.querySelector("#preview-trim-segment")?.addEventListener("click", () => playTrimSegment(panel, media, row));
+  panel.querySelector("#save-scene-trim")?.addEventListener("click", () => saveSceneClip(panel, media, row, "manual"));
+  panel.querySelector("#auto-scene-trim")?.addEventListener("click", () => {
+    if (range) range.value = "0";
+    if (number) number.value = "0";
+    saveSceneClip(panel, media, row, "auto_start");
+  });
+  panel.querySelector("[data-view-target]")?.addEventListener("click", () => navigate("materials"));
+  panel.querySelectorAll("#trim-flip-horizontal, #trim-contrast, #trim-brightness, #trim-saturation").forEach((input) => {
+    input.addEventListener("input", () => applyTrimDraftToStage(panel));
+  });
+  sync(mediaTrimStart(media), false);
+  applyTrimDraftToStage(panel);
+}
+
+function updateTrimControls(panel, media, row, value = null) {
+  const range = panel.querySelector("#studio-trim-start");
+  const number = panel.querySelector("#studio-trim-start-number");
+  const trimVideo = panel.querySelector("#studio-trim-video");
+  const targetDuration = mediaSceneDuration(media, row);
+  const assetDuration = assetDurationFromMedia(media, trimVideo);
+  const maxStart = Math.max(0, assetDuration - targetDuration);
+  const start = clamp(Number(value ?? range?.value ?? mediaTrimStart(media)) || 0, 0, maxStart);
+  const end = assetDuration ? Math.min(assetDuration, start + targetDuration) : start + targetDuration;
+  if (range) {
+    range.max = maxStart.toFixed(2);
+    range.value = start.toFixed(2);
+  }
+  if (number) {
+    number.max = maxStart.toFixed(2);
+    number.value = start.toFixed(2);
+  }
+  const assetLabel = panel.querySelector("#studio-trim-asset-duration");
+  if (assetLabel) assetLabel.innerHTML = `Raw <b>${assetDuration ? formatDuration(assetDuration) : "loading"}</b>`;
+  const windowLabel = panel.querySelector("#studio-trim-window-label");
+  if (windowLabel) {
+    const short = assetDuration && assetDuration < targetDuration ? " / short clip will loop" : "";
+    windowLabel.textContent = `Selected ${formatDuration(start)} - ${formatDuration(end)}${short}`;
+  }
+  return start;
+}
+
+function playTrimSegment(panel, media, row) {
+  const video = panel.querySelector("#studio-trim-video");
+  if (!video) return;
+  const start = updateTrimControls(panel, media, row);
+  const stop = Math.min(assetDurationFromMedia(media, video) || start + mediaSceneDuration(media, row), start + mediaSceneDuration(media, row));
+  const handler = () => {
+    if (Number(video.currentTime || 0) >= stop - 0.04) {
+      video.pause();
+      video.removeEventListener("timeupdate", handler);
+    }
+  };
+  if (video._vdTrimHandler) video.removeEventListener("timeupdate", video._vdTrimHandler);
+  video._vdTrimHandler = handler;
+  video.addEventListener("timeupdate", handler);
+  try {
+    video.currentTime = start;
+  } catch {
+    return;
+  }
+  const promise = video.play();
+  if (promise?.catch) promise.catch(() => {});
+}
+
+async function saveSceneClip(panel, media, row, trimSource) {
+  await run("Saving scene segment", async () => {
+    const trimVideo = panel.querySelector("#studio-trim-video");
+    const start = trimSource === "auto_start" ? 0 : updateTrimControls(panel, media, row);
+    const data = await api(`/api/videodesign/projects/${state.projectId}/scenes/${row.scene.scene_id}/clip`, {
+      method: "PATCH",
+      body: {
+        material_asset_id: media.source_ref.asset_id,
+        trim_source: trimSource,
+        trim_start_seconds: start,
+        asset_duration_seconds: assetDurationFromMedia(media, trimVideo) || null,
+        transform: trimTransformFromPanel(panel),
+        effects: trimEffectsFromPanel(panel),
+      },
+    });
+    replaceScene(data.scene);
+    if (data.timeline) state.timeline = data.timeline;
+  });
+}
+
+function trimTransformFromPanel(panel) {
+  return {
+    flip_horizontal: Boolean(panel.querySelector("#trim-flip-horizontal")?.checked),
+  };
+}
+
+function trimEffectsFromPanel(panel) {
+  return {
+    contrast: Number(panel.querySelector("#trim-contrast")?.value || 1),
+    brightness: Number(panel.querySelector("#trim-brightness")?.value || 1),
+    saturation: Number(panel.querySelector("#trim-saturation")?.value || 1),
+  };
+}
+
+function applyTrimDraftToStage(panel) {
+  const media = currentMediaItem();
+  if (!media) return;
+  media.transform = { ...(media.transform || {}), ...trimTransformFromPanel(panel) };
+  media.source_ref = { ...(media.source_ref || {}), effects: trimEffectsFromPanel(panel) };
+  applyStudioMediaEffects(document.getElementById("studio-video"), media);
 }
 
 function setPlaybackElementSource(element, url) {
@@ -1080,6 +1259,7 @@ function renderStudioStage() {
   if (audio) audio.muted = false;
   const mediaChanged = setPlaybackElementSource(video, media?.source_ref?.media_url || "");
   const audioChanged = setPlaybackElementSource(audio, audioItem?.source_ref?.audio_url || "");
+  applyStudioMediaEffects(video, media);
   if (mediaChanged && media && !state.timelinePlaying) {
     const setInitialCutTime = () => {
       try {
@@ -1123,7 +1303,7 @@ function renderStudioStage() {
 function studioMediaStateLabel(media, audioItem) {
   if (!media?.source_ref?.media_url) return "No media";
   const cutLabel = `Cut ${formatDuration(mediaTrimStart(media))}-${formatDuration(mediaTrimEnd(media))}`;
-  return `${cutLabel}${audioItem?.source_ref?.audio_url ? " + voice" : " / no voice"}`;
+  return `${trimStatusLabel(media)} / ${cutLabel}${audioItem?.source_ref?.audio_url ? " + voice" : " / no voice"}`;
 }
 
 function renderStudioInspector() {
@@ -1210,7 +1390,7 @@ function timelineClip(item, metrics) {
   return `
     <button class="vd-timeline-clip" data-item-id="${item.item_id}" data-type="${item.type}" data-active="${active}" data-editable="${editable}" style="left:${left}px;width:${width}px;" type="button">
       <span class="vd-resize-handle" data-edge="left"></span>
-      <strong>${escapeHtml(itemLabel(item))}</strong>
+      <strong>${escapeHtml(timelineClipLabel(item))}</strong>
       <span class="vd-resize-handle" data-edge="right"></span>
     </button>
   `;
@@ -1397,6 +1577,16 @@ function currentMediaItem() {
   return timelineItems().find((item) => item.type === "media" && item.scene_id === selectedRow()?.scene.scene_id) || null;
 }
 
+function mediaSceneDuration(media, row = selectedRow()) {
+  return Number(media?.source_ref?.timeline_duration_seconds || row?.scene?.duration_seconds || ((media?.end_seconds || 0) - (media?.start_seconds || 0)) || 0);
+}
+
+function assetDurationFromMedia(media, video = null) {
+  const loadedDuration = Number(video?.duration || 0);
+  if (Number.isFinite(loadedDuration) && loadedDuration > 0) return loadedDuration;
+  return Number(media?.source_ref?.asset_duration_seconds || 0);
+}
+
 function globalTimeFromVideo(media = currentMediaItem(), video = document.getElementById("studio-video")) {
   if (!media) return state.timelinePlayheadSeconds || 0;
   const localElapsed = Math.max(0, Number(video?.currentTime || 0) - mediaTrimStart(media));
@@ -1410,6 +1600,38 @@ function mediaTrimStart(item) {
 function mediaTrimEnd(item) {
   const fallback = mediaTrimStart(item) + Math.max(0, (item?.end_seconds || 0) - (item?.start_seconds || 0));
   return Number(item?.source_ref?.trim_end_seconds || fallback);
+}
+
+function trimStatusLabel(item) {
+  const status = item?.source_ref?.trim_status || "";
+  if (status === "trim_manual") return "Manual trim";
+  if (status === "trim_short_loop") return "Short clip loop";
+  if (status === "trim_stale") return "Stale trim";
+  return item?.source_ref?.trim_source === "manual" ? "Manual trim" : "Auto-start";
+}
+
+function timelineClipLabel(item) {
+  if (item?.type === "media") return trimStatusLabel(item);
+  return itemLabel(item);
+}
+
+function applyStudioMediaEffects(video, media) {
+  if (!video) return;
+  if (!media) {
+    video.style.transform = "";
+    video.style.filter = "";
+    return;
+  }
+  const transform = media.transform || {};
+  const effects = media.source_ref?.effects || {};
+  const flip = transform.flip_horizontal ? "scaleX(-1)" : "scaleX(1)";
+  const scale = Number(transform.scale || 1);
+  video.style.transform = `${flip} scale(${scale})`;
+  video.style.filter = [
+    `brightness(${Number(effects.brightness || 1)})`,
+    `contrast(${Number(effects.contrast || 1)})`,
+    `saturate(${Number(effects.saturation || 1)})`,
+  ].join(" ");
 }
 
 function placeTimelineClip(clip, item) {
@@ -1658,6 +1880,14 @@ function selectFirstItemForScene(sceneId) {
 
 function selectedRow() {
   return state.rows.find((row) => row.scene.scene_id === state.selectedSceneId) || null;
+}
+
+function replaceScene(scene) {
+  if (!scene?.scene_id) return;
+  const row = state.rows.find((entry) => entry.scene.scene_id === scene.scene_id);
+  if (row) row.scene = scene;
+  const projectIndex = state.project?.scenes?.findIndex((entry) => entry.scene_id === scene.scene_id) ?? -1;
+  if (projectIndex >= 0) state.project.scenes[projectIndex] = scene;
 }
 
 function selectedItem() {

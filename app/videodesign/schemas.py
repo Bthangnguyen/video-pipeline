@@ -37,6 +37,35 @@ class TTSMeta(BaseModel):
     sync_state: str = "pending"
 
 
+class SceneClip(BaseModel):
+    material_asset_id: str
+    trim_source: str = "auto_start"
+    trim_start_seconds: float = 0
+    trim_end_seconds: float = 0
+    duration_seconds: float = 0
+    fit: str = "cover"
+    loop_mode: str = "none"
+    status: str = "trim_auto"
+    transform: dict[str, Any] = Field(
+        default_factory=lambda: {
+            "flip_horizontal": False,
+            "crop_x": 50,
+            "crop_y": 50,
+            "zoom": 1,
+            "rotation": 0,
+        }
+    )
+    effects: dict[str, Any] = Field(
+        default_factory=lambda: {
+            "brightness": 1,
+            "contrast": 1,
+            "saturation": 1,
+            "sharpness": 0,
+        }
+    )
+    transition: dict[str, Any] = Field(default_factory=dict)
+
+
 class ScenePlan(BaseModel):
     scene_id: str
     order: int
@@ -55,6 +84,7 @@ class ScenePlan(BaseModel):
     approval_state: ApprovalState = "planned"
     selected_candidate_id: str | None = None
     material_asset_id: str | None = None
+    clip: SceneClip | None = None
 
 
 class DouyinSearchTask(BaseModel):
@@ -224,6 +254,17 @@ class MaterialsDownloadRequest(BaseModel):
 
 class MaterialsPruneRequest(BaseModel):
     scene_ids: list[str] | None = None
+
+
+class SceneClipPatch(BaseModel):
+    material_asset_id: str | None = None
+    trim_source: Literal["manual", "auto_start"] = "manual"
+    trim_start_seconds: float = Field(default=0, ge=0)
+    asset_duration_seconds: float | None = Field(default=None, ge=0)
+    loop_mode: str | None = None
+    transform: dict[str, Any] | None = None
+    effects: dict[str, Any] | None = None
+    transition: dict[str, Any] | None = None
 
 
 class TimelineItemPatch(BaseModel):

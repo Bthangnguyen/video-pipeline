@@ -12,6 +12,8 @@ Turn approved/downloaded scene materials into a visual editing workspace where t
 
 Studio must feel like an editor, not a JSON viewer.
 
+Trim selection and render assembly are specified separately in [06 Trim Selection And Render Assembly Flow](06-trim-render-flow.md). Studio should use that flow once material clips need to match TTS duration instead of showing whole raw videos.
+
 ## Route
 
 Preferred future route:
@@ -510,4 +512,3 @@ First implementation slice:
 5. Add media clip drag/resize only after text works.
 
 This order keeps the hardest UI behavior isolated before touching scene-level media timing.
-

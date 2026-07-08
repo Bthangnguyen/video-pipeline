@@ -9,7 +9,7 @@ from app.pinterestsearch.schemas import PublicPinterestResult, SearchResponse as
 from app.pinterestsearch.service import pinterest_service
 from app.videodesign.errors import SCRIPT_GENERATION_FAILED, VideoDesignError
 from app.videodesign.planner import split_script
-from app.videodesign.schemas import MediaCandidate, SplitSettings
+from app.videodesign.schemas import MaterialAsset, MediaCandidate, SplitSettings
 from app.videodesign.service import _download_source_url, videodesign_service
 
 
@@ -863,7 +863,7 @@ def test_videodesign_review_download_and_timeline(monkeypatch):
     assert timeline["items"][0]["source_ref"]["media_url"].startswith(f"/api/videodesign/projects/{project_id}/materials/")
     assert timeline["items"][0]["source_ref"]["trim_start_seconds"] == 0.0
     assert timeline["items"][0]["source_ref"]["trim_end_seconds"] <= timeline["items"][0]["source_ref"]["timeline_duration_seconds"]
-    assert timeline["items"][0]["source_ref"]["cut_strategy"] == "scene_duration_from_start"
+    assert timeline["items"][0]["source_ref"]["cut_strategy"] == "auto_start"
     assert "overlay_default" in timeline["layers"]
     assert any(item["type"] == "overlay" for item in timeline["items"])
     audio_item = next(item for item in timeline["items"] if item["type"] == "audio")
@@ -882,3 +882,73 @@ def test_videodesign_review_download_and_timeline(monkeypatch):
     material_response = client.get(timeline["items"][0]["source_ref"]["media_url"])
     assert material_response.status_code == 200
     assert material_response.content == b"video"
+
+
+def test_videodesign_scene_clip_patch_persists_and_updates_timeline(tmp_path):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_id = plan_response.json()["scenes"][0]["scene_id"]
+
+    project = videodesign_service.store.get(project_id)
+    scene = project.scenes[0]
+    scene.duration_seconds = 3
+    scene.approval_state = "downloaded"
+    for placeholder_scene in project.scenes[1:]:
+        placeholder_scene.approval_state = "placeholder_allowed"
+    asset_path = tmp_path / "scene.mp4"
+    asset_path.write_bytes(b"video")
+    asset = MaterialAsset(
+        asset_id="mat_clip_test",
+        project_id=project_id,
+        scene_id=scene_id,
+        candidate_id="cand_clip_test",
+        local_path=str(asset_path),
+        duration=10,
+    )
+    project.material_assets.append(asset)
+    scene.material_asset_id = asset.asset_id
+    videodesign_service.store.put(project)
+
+    studio_response = client.post(f"/api/videodesign/projects/{project_id}/studio")
+    assert studio_response.status_code == 200
+    media = next(item for item in studio_response.json()["timeline"]["items"] if item["type"] == "media")
+    assert media["source_ref"]["trim_source"] == "auto_start"
+    assert media["source_ref"]["trim_start_seconds"] == 0
+    assert media["source_ref"]["trim_end_seconds"] == 3
+
+    patch_response = client.patch(
+        f"/api/videodesign/projects/{project_id}/scenes/{scene_id}/clip",
+        json={
+            "material_asset_id": asset.asset_id,
+            "trim_source": "manual",
+            "trim_start_seconds": 9,
+            "asset_duration_seconds": 10,
+            "transform": {"flip_horizontal": True},
+            "effects": {"contrast": 1.12},
+        },
+    )
+    assert patch_response.status_code == 200
+    scene = patch_response.json()["scene"]
+    assert scene["clip"]["trim_source"] == "manual"
+    assert scene["clip"]["trim_start_seconds"] == 7
+    assert scene["clip"]["trim_end_seconds"] == 10
+    media = next(item for item in patch_response.json()["timeline"]["items"] if item["type"] == "media")
+    assert media["source_ref"]["trim_start_seconds"] == 7
+    assert media["source_ref"]["trim_end_seconds"] == 10
+    assert media["transform"]["flip_horizontal"] is True
+    assert media["source_ref"]["effects"]["contrast"] == 1.12
+
+    short_response = client.patch(
+        f"/api/videodesign/projects/{project_id}/scenes/{scene_id}/clip",
+        json={
+            "material_asset_id": asset.asset_id,
+            "trim_source": "manual",
+            "trim_start_seconds": 1,
+            "asset_duration_seconds": 2,
+        },
+    )
+    assert short_response.status_code == 200
+    assert short_response.json()["scene"]["clip"]["trim_start_seconds"] == 0
+    assert short_response.json()["scene"]["clip"]["trim_end_seconds"] == 2
+    assert short_response.json()["scene"]["clip"]["loop_mode"] == "loop_to_fill"

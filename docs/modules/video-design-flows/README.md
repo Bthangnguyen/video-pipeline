@@ -12,6 +12,7 @@ Project Start
 -> Template & Preset Setup
 -> Scene Plan & Material Review
 -> Studio Timeline
+-> Trim Selection & Render Assembly
 ```
 
 Each flow should feel like a dedicated screen, not a section in one long form.
@@ -23,6 +24,7 @@ Each flow should feel like a dedicated screen, not a section in one long form.
 - [03 Template Preset Flow](03-template-preset-flow.md)
 - [04 Scene Plan And Material Review Flow](04-scene-plan-material-review-flow.md)
 - [05 Studio Timeline Flow](05-studio-timeline-flow.md)
+- [06 Trim Selection And Render Assembly Flow](06-trim-render-flow.md)
 
 ## Shared Shell
 
@@ -59,4 +61,3 @@ Project title | Save state | Undo | Redo | Preview | Export disabled until rende
 - Make the current project state visible without requiring the user to inspect JSON.
 - Do not start Douyin search until script, scene plan, and preset choices are visible.
 - Studio must work from downloaded `MaterialAsset` files, not expiring Douyin result IDs.
-
