@@ -7,3 +7,4 @@ gmssl>=3.2.2
 pytest>=8.2.0
 pytest-asyncio>=0.23.0
 edge-tts>=7.0.0
+redis>=5.0.0

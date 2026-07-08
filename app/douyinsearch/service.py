@@ -36,6 +36,7 @@ class DouyinSearchService:
             "browser_profile_dir": str(settings.browser_profile_dir),
             "browser_profile_exists": settings.browser_profile_dir.exists(),
             "browser_visible_for_login": True,
+            "redis_enabled": self.store.redis.enabled,
         }
 
     async def check_session(self) -> dict:

@@ -15,7 +15,7 @@ Build the video pipeline as small modules that can be developed and tested indep
 - `douyinsearch` is the source video module.
 - `pinterestsearch` is a standalone source module for Pinterest image/video search with cookie-based Playwright access.
 - `/videodesign` is the second module UI.
-- VideoDesign projects are stored under `storage/videodesign/{project_id}/project.json`.
+- VideoDesign projects are stored under `storage/videodesign/{project_id}/project.json`; when `REDIS_URL` is configured, project/result JSON is also written through Redis for restart-safe recovery.
 - Scene planning parses scripts by natural sentence/line breaks first. `max_words_per_scene` is only a soft safety limit for overlong sentences.
 - Material search can request separate minimum candidate counts for Douyin and Pinterest per scene.
 - Optional smart keyword search uses DeepSeek to turn each scene into broader stock-video queries that avoid exact dialogue fragments.
@@ -102,6 +102,14 @@ python -m uvicorn app.main:app --reload --port 2323
 Open `http://localhost:2323`.
 
 `DOUYIN_USE_DIRECT_API` defaults to `false`. Direct API search is kept for manual research, but `auto` uses Playwright unless this flag is explicitly enabled.
+
+Optional Redis persistence:
+
+```bash
+REDIS_URL=redis://localhost:6379/0
+```
+
+When Redis is available, the app stores VideoDesign project JSON plus Douyin/Pinterest search result JSON in Redis. Local project JSON remains the fallback backup, and media files still stay on disk under `storage/`.
 
 ## Test
 

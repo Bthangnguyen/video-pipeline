@@ -19,6 +19,7 @@ class PinterestSearchService:
             "browser_ready": True,
             "cookie_file": str(settings.cookie_file),
             "cookie_file_exists": settings.cookie_file.exists(),
+            "redis_enabled": self.store.redis.enabled,
         }
 
     async def check_session(self) -> dict:

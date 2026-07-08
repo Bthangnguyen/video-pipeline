@@ -1398,6 +1398,16 @@ textarea {
   border-radius: 8px;
   object-fit: cover;
   background: #e8e1df;
+  transition: opacity 0.18s ease;
+}
+
+.vd-candidate img[data-cover-state="loading"] {
+  opacity: 0.62;
+}
+
+.vd-candidate img[data-cover-state="error"],
+.vd-candidate img[data-cover-state="empty"] {
+  opacity: 0.35;
 }
 
 .vd-candidate h3 {
@@ -1563,6 +1573,29 @@ textarea {
   border-radius: 8px;
   background: #111827;
   object-fit: cover;
+}
+
+.vd-preview-status {
+  color: #667085;
+  font-size: 12px;
+}
+
+.vd-preview-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vd-preview-sources button {
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.vd-preview-sources button[data-active="true"] {
+  border-color: #111827;
+  color: #111827;
 }
 
 .vd-audio-preview {

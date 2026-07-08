@@ -33,11 +33,14 @@ class BrowserClient:
         self._playwright = None
         self._browser = None
         self._context = None
+        self._page = None
+        self._search_lock = asyncio.Lock()
 
     async def close(self) -> None:
         if self._context:
             await self._context.close()
             self._context = None
+            self._page = None
         if self._browser:
             await self._browser.close()
             self._browser = None
@@ -90,15 +93,19 @@ class BrowserClient:
             except Exception:
                 return
 
-        page.on("response", lambda response: asyncio.create_task(capture_response(response)))
+        response_handler = lambda response: asyncio.create_task(capture_response(response))
+        page.on("response", response_handler)
         try:
             if self.profile_dir:
                 login_detail = await self._open_login_page(page)
                 checks.append(_check("open_login", True, "Opened Douyin login page. Log in or solve captcha in the Chromium window if prompted.", login_detail))
                 state = await self._detect_page_state(page)
                 state = await self._wait_for_manual_session(page, state)
-            await page.goto("https://www.douyin.com/jingxuan", wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(1500)
+            if "douyin.com" not in page.url:
+                await page.goto("https://www.douyin.com/jingxuan", wait_until="domcontentloaded", timeout=45000)
+                await page.wait_for_timeout(1500)
+            else:
+                await page.wait_for_timeout(800)
             checks.append(_check("load_jingxuan", True, "Loaded https://www.douyin.com/jingxuan."))
             state = await self._detect_page_state(page)
             state = await self._wait_for_manual_session(page, state)
@@ -132,10 +139,17 @@ class BrowserClient:
         except Exception as exc:
             checks.append(_check("network_douyin", False, str(exc)))
         finally:
+            self._remove_response_handler(page, response_handler)
             await self._release_context(context)
         return {"success": all(item["ok"] for item in checks), "source": "douyinsearch", "state": state, "checks": checks}
 
     async def search(self, keyword: str, limit: int) -> tuple[list[DouyinResult], dict]:
+        if self.profile_dir:
+            async with self._search_lock:
+                return await self._search(keyword, limit)
+        return await self._search(keyword, limit)
+
+    async def _search(self, keyword: str, limit: int) -> tuple[list[DouyinResult], dict]:
         if not self.cookie_file.exists():
             raise DouyinSearchError(MISSING_COOKIE_FILE, "Cookie file does not exist.")
 
@@ -150,15 +164,19 @@ class BrowserClient:
             except Exception:
                 return
 
-        page.on("response", lambda response: asyncio.create_task(capture_response(response)))
+        response_handler = lambda response: asyncio.create_task(capture_response(response))
+        page.on("response", response_handler)
 
         try:
             if self.profile_dir and self._needs_login_bootstrap():
                 await self._open_login_page(page)
                 state = await self._detect_page_state(page)
                 await self._wait_for_manual_session(page, state)
-            await page.goto("https://www.douyin.com/jingxuan", wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(1500)
+            if "douyin.com" not in page.url:
+                await page.goto("https://www.douyin.com/jingxuan", wait_until="domcontentloaded", timeout=45000)
+                await page.wait_for_timeout(1500)
+            else:
+                await page.wait_for_timeout(800)
             state = await self._detect_page_state(page)
             state = await self._wait_for_manual_session(page, state)
             if state == "challenge_required":
@@ -194,6 +212,7 @@ class BrowserClient:
         except Exception as exc:
             raise DouyinSearchError(BROWSER_SEARCH_FAILED, f"Browser search failed: {exc}", retryable=True) from exc
         finally:
+            self._remove_response_handler(page, response_handler)
             await self._release_context(context)
 
     async def _browser_instance(self):
@@ -212,16 +231,49 @@ class BrowserClient:
 
     async def _new_page_context(self):
         context = await self._new_context()
+        if self.profile_dir:
+            try:
+                page = await self._persistent_page(context)
+                return context, page
+            except Exception as exc:
+                if not self._is_target_closed_error(exc):
+                    raise
+                self._context = None
+                self._page = None
+                context = await self._new_context()
+                page = await self._persistent_page(context)
+                return context, page
         try:
             page = await context.new_page()
             return context, page
-        except Exception as exc:
-            if not self.profile_dir or not self._is_target_closed_error(exc):
-                raise
-            self._context = None
-            context = await self._new_context()
-            page = await context.new_page()
-            return context, page
+        except Exception:
+            await context.close()
+            raise
+
+    async def _persistent_page(self, context):
+        if self._page and not self._page.is_closed():
+            await self._close_extra_persistent_pages(self._page)
+            return self._page
+
+        pages = [page for page in context.pages if not page.is_closed()]
+        douyin_pages = [page for page in pages if "douyin.com" in page.url]
+        page = douyin_pages[-1] if douyin_pages else (pages[0] if pages else await context.new_page())
+        self._page = page
+        await self._close_extra_persistent_pages(page)
+        return page
+
+    async def _close_extra_persistent_pages(self, keep_page) -> None:
+        if not self._context:
+            return
+        for page in list(self._context.pages):
+            if page is keep_page or page.is_closed():
+                continue
+            url = page.url or ""
+            if url == "about:blank" or "douyin.com" in url:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
 
     async def _new_context(self):
         if self.profile_dir:
@@ -247,6 +299,7 @@ class BrowserClient:
                 return self._context
             except Exception:
                 self._context = None
+                self._page = None
         try:
             from playwright.async_api import async_playwright
         except ImportError as exc:
@@ -254,6 +307,7 @@ class BrowserClient:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         if not self._playwright:
             self._playwright = await async_playwright().start()
+        self._page = None
         self._context = await self._playwright.chromium.launch_persistent_context(
             str(self.profile_dir),
             headless=False,
@@ -274,6 +328,12 @@ class BrowserClient:
         if context is self._context:
             return
         await context.close()
+
+    def _remove_response_handler(self, page, handler) -> None:
+        try:
+            page.remove_listener("response", handler)
+        except Exception:
+            pass
 
     async def _open_login_page(self, page) -> dict:
         last_error = ""

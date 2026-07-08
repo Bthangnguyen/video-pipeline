@@ -3,6 +3,7 @@ import uuid
 from dataclasses import dataclass
 
 from app.pinterestsearch.schemas import PinterestResult
+from app.shared.redis_store import RedisJsonStore
 
 
 @dataclass
@@ -15,6 +16,7 @@ class ResultStore:
     def __init__(self, ttl_seconds: int):
         self.ttl_seconds = ttl_seconds
         self._results: dict[str, StoredResult] = {}
+        self.redis = RedisJsonStore("pinterest_result")
 
     def put_many(self, results: list[PinterestResult]) -> list[PinterestResult]:
         expires_at = time.time() + self.ttl_seconds
@@ -23,18 +25,29 @@ class ResultStore:
             if not result.result_id:
                 result.result_id = f"pinr_{uuid.uuid4().hex}"
             self._results[result.result_id] = StoredResult(result=result, expires_at=expires_at)
+            self.redis.set_text(result.result_id, result.model_dump_json(), self.ttl_seconds)
             stored.append(result)
         self.cleanup()
         return stored
 
     def get(self, result_id: str) -> PinterestResult | None:
         record = self._results.get(result_id)
-        if not record:
+        if record:
+            if record.expires_at <= time.time():
+                self._results.pop(result_id, None)
+            else:
+                return record.result
+
+        payload = self.redis.get_text(result_id)
+        if not payload:
             return None
-        if record.expires_at <= time.time():
-            self._results.pop(result_id, None)
+        try:
+            result = PinterestResult.model_validate_json(payload)
+        except Exception:
+            self.redis.delete(result_id)
             return None
-        return record.result
+        self._results[result_id] = StoredResult(result=result, expires_at=time.time() + self.ttl_seconds)
+        return result
 
     def cleanup(self) -> None:
         now = time.time()

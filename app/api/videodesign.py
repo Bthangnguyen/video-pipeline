@@ -9,6 +9,7 @@ from app.videodesign.schemas import (
     KeywordGenerateRequest,
     MaterialsDownloadRequest,
     MaterialsPreflightRequest,
+    MaterialsPruneRequest,
     MaterialsSearchRequest,
     SceneSelectionRequest,
     ScriptGenerateRequest,
@@ -195,6 +196,14 @@ async def select_scene(project_id: str, scene_id: str, request: SceneSelectionRe
 async def download_materials(project_id: str, request: MaterialsDownloadRequest):
     try:
         return await videodesign_service.download_materials(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/materials/prune")
+async def prune_materials(project_id: str, request: MaterialsPruneRequest):
+    try:
+        return videodesign_service.prune_material_candidates(project_id, request)
     except VideoDesignError as error:
         return error_response(error)
 

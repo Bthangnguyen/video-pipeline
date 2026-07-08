@@ -215,6 +215,8 @@ def test_videodesign_search_returns_douyin_and_pinterest_candidates(monkeypatch)
     candidates = response.json()["rows"][0]["candidates"]
     assert {candidate["source"] for candidate in candidates} == {"douyinsearch", "pinterestsearch"}
     assert {candidate["source_item_id"] for candidate in candidates} == {"dy-aweme", "pin-1"}
+    pinterest_candidate = next(candidate for candidate in candidates if candidate["source"] == "pinterestsearch")
+    assert pinterest_candidate["media_url"] == "/pin-media"
 
 
 def test_videodesign_materials_preflight_returns_source_checks(monkeypatch):
@@ -299,6 +301,51 @@ def test_videodesign_material_search_keeps_partial_results_when_source_fails(mon
     assert review_response.json()["rows"][0]["search_errors"][0]["source"] == "pinterestsearch"
     assert review_response.json()["rows"][0]["search_errors"][0]["keyword"]
 
+
+def test_videodesign_material_search_clears_old_scene_errors(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_id = plan_response.json()["scenes"][0]["scene_id"]
+
+    async def failing_search(request):
+        raise DouyinSearchError("NO_RESULTS", "No old results.", retryable=True)
+
+    monkeypatch.setattr(douyin_service, "search", failing_search)
+    first_response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/search",
+        json={"scene_ids": [scene_id], "douyin_min_per_scene": 1, "pinterest_min_per_scene": 0, "queries_per_scene": 1},
+    )
+    assert first_response.status_code == 200
+    assert first_response.json()["rows"][0]["search_errors"][0]["code"] == "NO_RESULTS"
+
+    async def successful_search(request):
+        return SearchResponse(
+            keyword=request.keyword,
+            search_keyword=request.keyword,
+            strategy_used="browser",
+            items=[
+                PublicDouyinResult(
+                    result_id="fresh-result",
+                    douyin_aweme_id="fresh-aweme",
+                    title="fresh cat footage",
+                    cover_url="/cover",
+                    stream_url="/stream",
+                    download_url="/download",
+                    duration=5.0,
+                )
+            ],
+        )
+
+    monkeypatch.setattr(douyin_service, "search", successful_search)
+    second_response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/search",
+        json={"scene_ids": [scene_id], "douyin_min_per_scene": 1, "pinterest_min_per_scene": 0, "queries_per_scene": 1},
+    )
+    assert second_response.status_code == 200
+    row = second_response.json()["rows"][0]
+    assert row["candidates"][0]["source_item_id"] == "fresh-aweme"
+    assert row["search_errors"] == []
 
 def test_videodesign_material_search_tries_next_keyword_after_failure(monkeypatch):
     client = TestClient(app)
@@ -529,6 +576,172 @@ def test_videodesign_downloads_pinterest_candidate_with_ytdlp(monkeypatch, tmp_p
     assert download_response.json()["assets"][0]["source_url"] == "https://www.pinterest.com/pin/123/"
 
 
+def test_videodesign_downloads_douyin_candidate_after_result_cache_expires(monkeypatch, tmp_path):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_id = plan_response.json()["scenes"][0]["scene_id"]
+
+    candidate = MediaCandidate(
+        candidate_id="cand-dy-remote",
+        source="douyinsearch",
+        scene_id=scene_id,
+        source_result_id="expired-result",
+        source_item_id="7502421161918696761",
+        douyin_result_id="expired-result",
+        douyin_aweme_id="7502421161918696761",
+        source_url="https://www.douyin.com/video/7502421161918696761",
+        remote_download_url="https://example.com/douyin.mp4",
+        status="approved",
+    )
+    project = videodesign_service.store.get(project_id)
+    scene = next(item for item in project.scenes if item.scene_id == scene_id)
+    project.candidates.append(candidate)
+    scene.selected_candidate_id = candidate.candidate_id
+    scene.approval_state = "approved"
+    videodesign_service.store.put(project)
+
+    async def fake_ytdlp_fail(*args, **kwargs):
+        raise RuntimeError("yt-dlp needs fresh cookies")
+
+    async def fake_download_url(remote_url, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"video")
+        assert remote_url == "https://example.com/douyin.mp4"
+        return output_path
+
+    monkeypatch.setattr(videodesign_service.ytdlp, "download", fake_ytdlp_fail)
+    monkeypatch.setattr(douyin_service.stream_proxy, "download_url_to_file", fake_download_url)
+    monkeypatch.setattr(douyin_service.store, "get", lambda result_id: None)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/download",
+        json={"scene_ids": [scene_id]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["assets"][0]["candidate_id"] == "cand-dy-remote"
+    assert body["skipped"] == []
+
+
+def test_videodesign_download_skips_unapproved_scene(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_id = plan_response.json()["scenes"][0]["scene_id"]
+
+    async def fake_search(request):
+        return SearchResponse(
+            keyword=request.keyword,
+            search_keyword=request.keyword,
+            strategy_used="browser",
+            items=[
+                PublicDouyinResult(
+                    result_id="unapproved-result",
+                    douyin_aweme_id="unapproved-aweme",
+                    title="cat footage",
+                    cover_url="/cover",
+                    stream_url="/stream",
+                    download_url="/download",
+                    duration=5.0,
+                )
+            ],
+        )
+
+    monkeypatch.setattr(douyin_service, "search", fake_search)
+    search_response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/search",
+        json={"scene_ids": [scene_id], "douyin_min_per_scene": 1, "pinterest_min_per_scene": 0, "queries_per_scene": 1},
+    )
+    assert search_response.status_code == 200
+
+    project = videodesign_service.store.get(project_id)
+    scene = next(item for item in project.scenes if item.scene_id == scene_id)
+    scene.selected_candidate_id = search_response.json()["rows"][0]["candidates"][0]["candidate_id"]
+    videodesign_service.store.put(project)
+
+    download_response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/download",
+        json={"scene_ids": [scene_id]},
+    )
+
+    assert download_response.status_code == 200
+    body = download_response.json()
+    assert body["assets"] == []
+    assert body["skipped"][0]["scene_id"] == scene_id
+
+
+def test_videodesign_prune_keeps_only_selected_candidate(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_id = plan_response.json()["scenes"][0]["scene_id"]
+
+    async def fake_douyin_search(request):
+        return SearchResponse(
+            keyword=request.keyword,
+            search_keyword=request.keyword,
+            strategy_used="browser",
+            items=[
+                PublicDouyinResult(
+                    result_id="keep-dy",
+                    douyin_aweme_id="keep-aweme",
+                    title="cat close up",
+                    cover_url="/cover",
+                    stream_url="/stream",
+                    download_url="/download",
+                    duration=5.0,
+                )
+            ],
+        )
+
+    async def fake_pinterest_search(request):
+        return PinterestSearchResponse(
+            keyword=request.keyword,
+            media_type="video",
+            aspect_ratio="9:16",
+            items=[
+                PublicPinterestResult(
+                    result_id="remove-pin",
+                    pin_id="remove-pin-id",
+                    title="extra cat video",
+                    media_type="video",
+                    media_url="/pin-media",
+                    stream_url="/pin-stream",
+                    download_url="/pin-download",
+                    cover_url="/pin-cover",
+                    width=576,
+                    height=1024,
+                    aspect_ratio="9:16",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(douyin_service, "search", fake_douyin_search)
+    monkeypatch.setattr(pinterest_service, "search", fake_pinterest_search)
+    search_response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/search",
+        json={"scene_ids": [scene_id], "douyin_min_per_scene": 1, "pinterest_min_per_scene": 1, "queries_per_scene": 1},
+    )
+    candidates = search_response.json()["rows"][0]["candidates"]
+    selected = next(candidate for candidate in candidates if candidate["source"] == "douyinsearch")
+    client.patch(
+        f"/api/videodesign/projects/{project_id}/scenes/{scene_id}/selection",
+        json={"action": "approve", "candidate_id": selected["candidate_id"]},
+    )
+
+    prune_response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/prune",
+        json={"scene_ids": [scene_id]},
+    )
+
+    assert prune_response.status_code == 200
+    assert prune_response.json()["removed"] == 1
+    review = client.get(f"/api/videodesign/projects/{project_id}/review").json()
+    assert [candidate["candidate_id"] for candidate in review["rows"][0]["candidates"]] == [selected["candidate_id"]]
+
+
 def test_videodesign_derives_download_urls_for_old_candidates():
     assert (
         _download_source_url(
@@ -563,6 +776,12 @@ def test_videodesign_review_download_and_timeline(monkeypatch):
     )
     plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
     scene_id = plan_response.json()["scenes"][0]["scene_id"]
+    tts_response = client.post(
+        f"/api/videodesign/projects/{project_id}/tts/generate",
+        json={"scene_ids": [scene_id], "provider": "timing_only"},
+    )
+    assert tts_response.status_code == 200
+    assert tts_response.json()["scenes"][0]["tts"]["audio_url"]
 
     douyin_service.store.put_many(
         [
@@ -647,6 +866,9 @@ def test_videodesign_review_download_and_timeline(monkeypatch):
     assert timeline["items"][0]["source_ref"]["cut_strategy"] == "scene_duration_from_start"
     assert "overlay_default" in timeline["layers"]
     assert any(item["type"] == "overlay" for item in timeline["items"])
+    audio_item = next(item for item in timeline["items"] if item["type"] == "audio")
+    assert audio_item["source_ref"]["audio_url"].endswith(f"/scenes/{scene_id}/audio")
+    assert audio_item["start_seconds"] == timeline["items"][0]["start_seconds"]
 
     text_item = next(item for item in timeline["items"] if item["type"] == "text")
     patch_response = client.patch(

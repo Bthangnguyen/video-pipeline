@@ -8,6 +8,7 @@ const state = {
   selectedItemId: "",
   previewCandidateId: "",
   materialHealth: null,
+  materialCoverCache: {},
   selectedTool: "script",
   timelineFit: true,
   timelinePixelsPerSecond: 48,
@@ -105,6 +106,7 @@ function bindEvents() {
   document.getElementById("run-material-health").addEventListener("click", runMaterialHealth);
   document.getElementById("clear-scene-candidates").addEventListener("click", clearSelectedSceneCandidates);
   document.getElementById("clear-all-candidates").addEventListener("click", clearAllCandidates);
+  document.getElementById("keep-selected-candidates").addEventListener("click", keepSelectedCandidates);
   document.getElementById("download-approved").addEventListener("click", downloadApproved);
 
   document.getElementById("create-timeline").addEventListener("click", createTimeline);
@@ -114,6 +116,8 @@ function bindEvents() {
   document.getElementById("studio-video").addEventListener("ended", onStudioVideoEnded);
   document.getElementById("studio-video").addEventListener("play", updateStudioPlaybackButton);
   document.getElementById("studio-video").addEventListener("pause", updateStudioPlaybackButton);
+  document.getElementById("studio-audio").addEventListener("play", updateStudioPlaybackButton);
+  document.getElementById("studio-audio").addEventListener("pause", updateStudioPlaybackButton);
   document.getElementById("timeline-fit").addEventListener("click", fitTimeline);
   document.getElementById("timeline-zoom-out").addEventListener("click", () => zoomTimeline(-1));
   document.getElementById("timeline-zoom-in").addEventListener("click", () => zoomTimeline(1));
@@ -516,18 +520,40 @@ async function allowPlaceholder(sceneId) {
   });
 }
 
+async function keepSelectedCandidates() {
+  ensureProject();
+  const sceneIds = state.rows.filter(rowHasApprovedCandidate).map((row) => row.scene.scene_id);
+  if (!sceneIds.length) {
+    setStatus("No selected candidates are ready to keep.", "idle");
+    return;
+  }
+  if (!window.confirm(`Remove unselected candidate videos from ${sceneIds.length} selected scene(s)?`)) return;
+  await run("Keeping selected videos", async () => {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/materials/prune`, {
+      method: "POST",
+      body: { scene_ids: sceneIds },
+    });
+    state.previewCandidateId = "";
+    await loadReview();
+    setStatus(`Kept ${data.kept} selected video(s), removed ${data.removed} extra candidate(s).`, "idle");
+  });
+}
+
 async function downloadApproved() {
   ensureProject();
   await run("Downloading approved videos", async () => {
     const sceneIds = state.rows
-      .filter((row) => row.scene.selected_candidate_id && !row.scene.material_asset_id)
+      .filter((row) => rowHasApprovedCandidate(row) && !row.scene.material_asset_id)
       .map((row) => row.scene.scene_id);
     if (!sceneIds.length) throw new Error("No approved scenes are waiting for download.");
-    await api(`/api/videodesign/projects/${state.projectId}/materials/download`, {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/materials/download`, {
       method: "POST",
       body: { scene_ids: sceneIds },
     });
     await loadReview();
+    if (data.skipped?.length) {
+      setStatus(`Downloaded ${data.assets.length} video(s), skipped ${data.skipped.length} scene(s) without approved candidates.`, "idle");
+    }
   });
 }
 
@@ -540,6 +566,12 @@ async function createTimeline() {
     state.selectedItemId = firstText?.item_id || state.timeline.items[0]?.item_id || "";
     renderStudio();
   });
+}
+
+function rowHasApprovedCandidate(row) {
+  if (!row?.scene?.selected_candidate_id) return false;
+  const selected = row.candidates?.find((candidate) => candidate.candidate_id === row.scene.selected_candidate_id);
+  return selected?.status === "approved";
 }
 
 function materialSearchBody(sceneIds = null) {
@@ -739,26 +771,80 @@ function renderCandidateBoard() {
   board.querySelectorAll("[data-delete-candidate]").forEach((button) => {
     button.addEventListener("click", () => deleteCandidate(button.dataset.deleteScene, button.dataset.deleteCandidate));
   });
+  hydrateCandidateCoverImages(board);
 }
 
 function candidateCards(candidates, row, source) {
   if (!candidates.length) return `<div class="vd-empty">No ${escapeHtml(sourceLabel(source))} candidates yet.</div>`;
-  return candidates.map((candidate) => `
-    <article class="vd-candidate ${candidate.status === "approved" ? "is-approved" : ""}">
-      <img src="${candidate.cover_url}" alt="">
-      <div>
-        <span class="vd-source-badge">${escapeHtml(sourceLabel(candidate.source))}</span>
-        <h3>${escapeHtml(candidate.title || candidate.source_item_id || candidate.douyin_aweme_id)}</h3>
-        <p>${escapeHtml(candidate.match_reason)}</p>
-        <p>${formatDuration(candidate.duration)} / ${escapeHtml(candidate.source_item_id || candidate.douyin_aweme_id)}</p>
-        <div class="vd-button-row">
-          <button data-approve-candidate="${candidate.candidate_id}" data-approve-scene="${row.scene.scene_id}" type="button">${candidate.status === "approved" ? "Approved" : "Approve"}</button>
-          <button data-preview-candidate="${candidate.candidate_id}" type="button">Preview</button>
-          <button data-delete-candidate="${candidate.candidate_id}" data-delete-scene="${row.scene.scene_id}" class="vd-danger" type="button">Delete</button>
+  return candidates.map((candidate) => {
+    const coverSrc = candidateCoverSrc(candidate);
+    const coverState = state.materialCoverCache[candidate.candidate_id]?.state || "loading";
+    return `
+      <article class="vd-candidate ${candidate.status === "approved" ? "is-approved" : ""}">
+        <img src="${escapeHtml(coverSrc)}" alt="" loading="eager" decoding="async" data-cover-candidate-id="${escapeHtml(candidate.candidate_id)}" data-cover-url="${escapeHtml(candidate.cover_url || "")}" data-cover-state="${escapeHtml(coverState)}">
+        <div>
+          <span class="vd-source-badge">${escapeHtml(sourceLabel(candidate.source))}</span>
+          <h3>${escapeHtml(candidate.title || candidate.source_item_id || candidate.douyin_aweme_id)}</h3>
+          <p>${escapeHtml(candidate.match_reason)}</p>
+          <p>${formatDuration(candidate.duration)} / ${escapeHtml(candidate.source_item_id || candidate.douyin_aweme_id)}</p>
+          <div class="vd-button-row">
+            <button data-approve-candidate="${candidate.candidate_id}" data-approve-scene="${row.scene.scene_id}" type="button">${candidate.status === "approved" ? "Approved" : "Approve"}</button>
+            <button data-preview-candidate="${candidate.candidate_id}" type="button">Preview</button>
+            <button data-delete-candidate="${candidate.candidate_id}" data-delete-scene="${row.scene.scene_id}" class="vd-danger" type="button">Delete</button>
+          </div>
         </div>
-      </div>
-    </article>
-  `).join("");
+      </article>
+    `;
+  }).join("");
+}
+
+function candidateCoverSrc(candidate) {
+  const cached = state.materialCoverCache[candidate.candidate_id];
+  return cached?.objectUrl || cached?.url || candidate.cover_url || "";
+}
+
+function hydrateCandidateCoverImages(container) {
+  container.querySelectorAll("[data-cover-candidate-id]").forEach((image) => {
+    const candidateId = image.dataset.coverCandidateId;
+    const coverUrl = image.dataset.coverUrl || "";
+    if (!candidateId || !coverUrl) {
+      image.dataset.coverState = "empty";
+      return;
+    }
+    const cached = state.materialCoverCache[candidateId];
+    if (cached?.objectUrl) {
+      image.src = cached.objectUrl;
+      image.dataset.coverState = "loaded";
+      return;
+    }
+    image.addEventListener("load", () => {
+      state.materialCoverCache[candidateId] = { ...(state.materialCoverCache[candidateId] || {}), url: coverUrl, state: "loaded" };
+      image.dataset.coverState = "loaded";
+    }, { once: true });
+    image.addEventListener("error", () => {
+      state.materialCoverCache[candidateId] = { ...(state.materialCoverCache[candidateId] || {}), url: coverUrl, state: "error" };
+      image.dataset.coverState = "error";
+    }, { once: true });
+    if (cached?.fetching || cached?.state === "error") return;
+    state.materialCoverCache[candidateId] = { url: coverUrl, state: "loading", fetching: true };
+    fetch(coverUrl, { credentials: "same-origin" })
+      .then((response) => {
+        if (!response.ok) throw new Error("cover fetch failed");
+        return response.blob();
+      })
+      .then((blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        state.materialCoverCache[candidateId] = { url: coverUrl, objectUrl, state: "loaded" };
+        if (document.body.contains(image)) {
+          image.src = objectUrl;
+          image.dataset.coverState = "loaded";
+        }
+      })
+      .catch(() => {
+        state.materialCoverCache[candidateId] = { url: coverUrl, state: "error" };
+        if (document.body.contains(image)) image.dataset.coverState = "error";
+      });
+  });
 }
 
 function renderMaterialControls(row) {
@@ -803,14 +889,82 @@ function renderMaterialPreview(row) {
     panel.innerHTML = `<div class="vd-empty">Choose a candidate to preview here.</div>`;
     return;
   }
+  const sources = materialPreviewSources(candidate);
   panel.innerHTML = `
     <h4>${escapeHtml(sourceLabel(candidate.source))} preview</h4>
-    <video controls playsinline preload="metadata" poster="${candidate.cover_url}" src="${candidate.stream_url}"></video>
+    <video data-material-preview-video controls playsinline preload="metadata" poster="${escapeHtml(candidate.cover_url || "")}"></video>
+    <div class="vd-preview-status" data-material-preview-status>${sources.length ? "Loading preview..." : "No preview URL is available for this candidate."}</div>
+    ${sources.length > 1 ? `
+      <div class="vd-preview-sources">
+        ${sources.map((source, index) => `<button data-preview-source-index="${index}" type="button">${escapeHtml(source.label)}</button>`).join("")}
+      </div>
+    ` : ""}
     <strong>${escapeHtml(candidate.title || candidate.source_item_id || candidate.douyin_aweme_id)}</strong>
     <p>${escapeHtml(candidate.search_keyword || candidate.match_reason || "")}</p>
   `;
+  setupMaterialPreviewVideo(panel, sources);
 }
 
+function materialPreviewSources(candidate) {
+  const sources = [];
+  const add = (url, label) => {
+    const value = String(url || "").trim();
+    if (!value || sources.some((source) => source.url === value)) return;
+    sources.push({ url: value, label });
+  };
+  if (candidate.source === "pinterestsearch") {
+    add(candidate.media_url, "Media");
+    add(candidate.stream_url, "Stream");
+    add(candidate.download_url, "Download");
+  } else {
+    add(candidate.stream_url, "Stream");
+    add(candidate.download_url, "Download");
+  }
+  return sources;
+}
+
+function setupMaterialPreviewVideo(panel, sources) {
+  const video = panel.querySelector("[data-material-preview-video]");
+  const status = panel.querySelector("[data-material-preview-status]");
+  const buttons = Array.from(panel.querySelectorAll("[data-preview-source-index]"));
+  if (!video || !sources.length) return;
+
+  let activeIndex = 0;
+  const setStatusText = (message) => {
+    if (status) status.textContent = message;
+  };
+  const updateButtons = () => {
+    buttons.forEach((button) => {
+      button.dataset.active = Number(button.dataset.previewSourceIndex) === activeIndex ? "true" : "false";
+    });
+  };
+  const setSource = (index, message = "") => {
+    activeIndex = index;
+    const source = sources[activeIndex];
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    video.src = source.url;
+    video.load();
+    setStatusText(message || `Loading ${source.label.toLowerCase()} preview...`);
+    updateButtons();
+  };
+
+  video.addEventListener("loadedmetadata", () => setStatusText(`Preview ready via ${sources[activeIndex].label.toLowerCase()}.`));
+  video.addEventListener("error", () => {
+    const failed = sources[activeIndex];
+    if (activeIndex < sources.length - 1) {
+      const next = sources[activeIndex + 1];
+      setSource(activeIndex + 1, `${failed.label} preview failed, trying ${next.label.toLowerCase()}...`);
+      return;
+    }
+    setStatusText("Preview failed in browser. Try approving/downloading this candidate, or choose another result.");
+  });
+  buttons.forEach((button) => {
+    button.addEventListener("click", () => setSource(Number(button.dataset.previewSourceIndex || 0)));
+  });
+  setSource(0);
+}
 function renderMaterialHealth() {
   const panel = document.getElementById("material-health-panel");
   if (!panel) return;
@@ -888,12 +1042,34 @@ function renderStudioToolPanel() {
   });
 }
 
+function setPlaybackElementSource(element, url) {
+  if (!element) return false;
+  const nextUrl = String(url || "");
+  const currentUrl = element.getAttribute("src") || "";
+  if (!nextUrl) {
+    if (currentUrl) {
+      element.pause();
+      element.removeAttribute("src");
+      element.load();
+      return true;
+    }
+    return false;
+  }
+  if (currentUrl === nextUrl) return false;
+  element.pause();
+  element.src = nextUrl;
+  element.load();
+  return true;
+}
+
 function renderStudioStage() {
   const row = selectedRow();
   const media = timelineItems().find((item) => item.type === "media" && item.scene_id === row?.scene.scene_id);
+  const audioItem = timelineItems().find((item) => item.type === "audio" && item.scene_id === row?.scene.scene_id);
   const text = timelineItems().find((item) => item.type === "text" && item.scene_id === row?.scene.scene_id);
   const caption = timelineItems().find((item) => item.type === "caption" && item.scene_id === row?.scene.scene_id);
   const video = document.getElementById("studio-video");
+  const audio = document.getElementById("studio-audio");
   const captionEl = document.getElementById("studio-caption");
   const textEl = document.getElementById("studio-text");
   const stage = document.getElementById("studio-stage");
@@ -901,14 +1077,35 @@ function renderStudioStage() {
   const mediaState = document.getElementById("studio-media-state");
 
   video.muted = true;
-  if (media?.source_ref?.media_url && video.getAttribute("src") !== media.source_ref.media_url) {
-    video.src = media.source_ref.media_url;
-    video.load();
+  if (audio) audio.muted = false;
+  const mediaChanged = setPlaybackElementSource(video, media?.source_ref?.media_url || "");
+  const audioChanged = setPlaybackElementSource(audio, audioItem?.source_ref?.audio_url || "");
+  if (mediaChanged && media && !state.timelinePlaying) {
+    const setInitialCutTime = () => {
+      try {
+        video.currentTime = mediaTrimStart(media);
+      } catch {
+        return;
+      }
+      updateStudioClock(media.start_seconds);
+    };
+    if (video.readyState > 0) setInitialCutTime();
+    else video.addEventListener("loadedmetadata", setInitialCutTime, { once: true });
   }
-  if (!media?.source_ref?.media_url) video.removeAttribute("src");
+  if (audioChanged && audio && !state.timelinePlaying) {
+    const resetAudio = () => {
+      try {
+        audio.currentTime = 0;
+      } catch {
+        return;
+      }
+    };
+    if (audio.readyState > 0) resetAudio();
+    else audio.addEventListener("loadedmetadata", resetAudio, { once: true });
+  }
 
   sceneLabel.textContent = row ? `Scene ${row.scene.order}` : "No scene selected";
-  mediaState.textContent = media?.source_ref?.media_url ? "Stream ready" : "No media";
+  mediaState.textContent = studioMediaStateLabel(media, audioItem);
   stage.dataset.overlay = state.preset.extras.overlay_pack_id || "caption_shadow";
   stage.dataset.captionStyle = state.preset.captions.style_id || "bold_outline";
   const chunks = caption?.source_ref?.caption_chunks || row?.scene.caption_chunks || [];
@@ -918,8 +1115,15 @@ function renderStudioStage() {
   const transform = text?.transform || { x: 50, y: 18 };
   textEl.style.left = `${Number(transform.x ?? 50)}%`;
   textEl.style.top = `${Number(transform.y ?? 18)}%`;
-  updateStudioClock();
+  if (!state.timelinePlaying && media) updateStudioClock(media.start_seconds);
+  else updateStudioClock();
   updateStudioPlaybackButton();
+}
+
+function studioMediaStateLabel(media, audioItem) {
+  if (!media?.source_ref?.media_url) return "No media";
+  const cutLabel = `Cut ${formatDuration(mediaTrimStart(media))}-${formatDuration(mediaTrimEnd(media))}`;
+  return `${cutLabel}${audioItem?.source_ref?.audio_url ? " + voice" : " / no voice"}`;
 }
 
 function renderStudioInspector() {
@@ -1122,16 +1326,59 @@ function syncStudioVideoToTimeline(globalTime, options = {}) {
       return;
     }
     updateStudioClock(globalTime);
+    syncStudioAudioToTimeline(globalTime, options);
     if (options.autoplay) playStudioVideo();
   };
   if (video.readyState > 0) setTime();
   else video.addEventListener("loadedmetadata", setTime, { once: true });
 }
 
+function currentAudioItem() {
+  return timelineItems().find((item) => item.type === "audio" && item.scene_id === selectedRow()?.scene.scene_id) || null;
+}
+
+function syncStudioAudioToTimeline(globalTime, options = {}) {
+  const audio = document.getElementById("studio-audio");
+  const item = currentAudioItem();
+  if (!audio || !item?.source_ref?.audio_url || !audio.src) return;
+  if (globalTime < item.start_seconds || globalTime > item.end_seconds) {
+    audio.pause();
+    return;
+  }
+  const targetTime = clamp(globalTime - item.start_seconds, 0, Math.max(0, item.end_seconds - item.start_seconds));
+  const drift = Math.abs(Number(audio.currentTime || 0) - targetTime);
+  const shouldSetTime = !options.tolerateDrift || drift > 0.28;
+  const setAudioTime = () => {
+    if (shouldSetTime) {
+      try {
+        audio.currentTime = targetTime;
+      } catch {
+        return;
+      }
+    }
+    if (options.autoplay) playStudioAudio();
+  };
+  if (audio.readyState > 0) setAudioTime();
+  else audio.addEventListener("loadedmetadata", setAudioTime, { once: true });
+}
+
+function playStudioAudio() {
+  const audio = document.getElementById("studio-audio");
+  if (!audio?.src) return;
+  const promise = audio.play();
+  if (promise?.catch) promise.catch(() => {});
+}
+
+function pauseStudioMedia() {
+  document.getElementById("studio-video")?.pause();
+  document.getElementById("studio-audio")?.pause();
+}
+
 function playStudioVideo() {
   const video = document.getElementById("studio-video");
   if (!video?.src) {
     state.timelinePlaying = false;
+    pauseStudioMedia();
     updateStudioPlaybackButton();
     return;
   }
@@ -1139,9 +1386,11 @@ function playStudioVideo() {
   if (promise?.catch) {
     promise.catch(() => {
       state.timelinePlaying = false;
+      pauseStudioMedia();
       updateStudioPlaybackButton();
     });
   }
+  playStudioAudio();
 }
 
 function currentMediaItem() {
@@ -1429,7 +1678,7 @@ function toggleStudioPlayback() {
   }
   if (state.timelinePlaying) {
     state.timelinePlaying = false;
-    video.pause();
+    pauseStudioMedia();
     updateStudioPlaybackButton();
     return;
   }
@@ -1451,6 +1700,7 @@ function onStudioVideoTimeUpdate() {
   if (!media) return;
   const video = document.getElementById("studio-video");
   const globalTime = globalTimeFromVideo(media, video);
+  syncStudioAudioToTimeline(globalTime, { autoplay: true, tolerateDrift: true });
   if (globalTime >= media.end_seconds - 0.05 || Number(video.currentTime || 0) >= mediaTrimEnd(media) - 0.05) {
     advanceTimelinePlayback(media.end_seconds + 0.001);
   }
@@ -1468,7 +1718,7 @@ function advanceTimelinePlayback(globalTime) {
   const duration = Math.max(1, state.timeline.duration_seconds || 1);
   if (globalTime >= duration - 0.01) {
     state.timelinePlaying = false;
-    document.getElementById("studio-video").pause();
+    pauseStudioMedia();
     seekTimeline(duration);
     updateStudioPlaybackButton();
     return;
@@ -1497,9 +1747,10 @@ function updateTimelinePlayhead(globalTime) {
 
 function updateStudioPlaybackButton() {
   const video = document.getElementById("studio-video");
+  const audio = document.getElementById("studio-audio");
   const button = document.getElementById("studio-play");
   if (!button || !video) return;
-  button.textContent = state.timelinePlaying || !video.paused ? "Pause" : "Play";
+  button.textContent = state.timelinePlaying || !video.paused || (audio?.src && !audio.paused) ? "Pause" : "Play";
 }
 
 function ensureProject() {

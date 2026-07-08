@@ -48,6 +48,23 @@ class StreamProxy:
             raise DouyinSearchError(NETWORK_ERROR, f"Could not download remote media: {exc}", retryable=True) from exc
         return output_path
 
+    async def download_url_to_file(self, remote_url: str, output_path):
+        if not remote_url:
+            raise DouyinSearchError(STREAM_RESOLVE_FAILED, "No remote video URL is available.", retryable=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        headers = self._headers()
+        timeout = httpx.Timeout(30.0, read=120.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                async with client.stream("GET", remote_url, headers=headers) as response:
+                    response.raise_for_status()
+                    with output_path.open("wb") as handle:
+                        async for chunk in response.aiter_bytes():
+                            handle.write(chunk)
+        except httpx.HTTPError as exc:
+            raise DouyinSearchError(NETWORK_ERROR, f"Could not download remote media: {exc}", retryable=True) from exc
+        return output_path
+
     async def _proxy_url(
         self,
         url: str,

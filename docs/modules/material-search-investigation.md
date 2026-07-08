@@ -81,3 +81,32 @@ Follow-up from live browser evidence on 2026-07-08:
 - The old detector only treated `/search/` and direct video anchors as success, so `/jingxuan/search/` pages with visible cards could still fail health.
 - Health now recognizes both `/search/` and `/jingxuan/search/`, waits longer for search results, and reports success when visible result cards appear even before API parsing succeeds.
 - The visible-card detector now looks for rendered card text with a duration plus author/date/wan-count signals, which matches the current Douyin search grid.
+## Douyin Playwright Behavior Plan
+
+Next implementation direction:
+
+- Reuse one persistent Douyin search tab instead of opening a new page for every keyword.
+- Add a Douyin browser lock so only one keyword controls the active tab at a time.
+- Avoid repeated login/bootstrap navigation during normal search; only bootstrap when profile is empty, health detects login/captcha, or the user explicitly runs health.
+- Search by editing the existing search input when possible; use direct search URL only as fallback.
+- Add a short human-paced delay between Douyin keywords.
+- If captcha/challenge is detected, pause the Douyin lane and let Pinterest continue instead of continuing to fire Douyin searches.
+- Later improvement: batch scene keywords through the same active tab session to reduce page churn further.
+
+## Inline Preview Follow-up
+
+Applied now:
+
+- Material candidates keep `media_url` in addition to `stream_url` and `download_url`.
+- The Materials preview player tries multiple candidate sources in-page instead of relying on one stream endpoint.
+- Pinterest preview source order is media proxy, transcoded stream, then download endpoint.
+- The preview panel shows loading/failure status so a broken remote media URL is visible instead of silently doing nothing.
+## Douyin Single Tab Reuse Update
+
+Applied after the behavior plan:
+
+- Persistent Douyin BrowserClient now reuses one active page instead of creating a new tab for every search call.
+- On persistent profile startup, it picks an existing Douyin tab when available and closes extra Douyin/about:blank tabs created by previous automation runs.
+- Douyin `search()` is guarded by a lock so one keyword controls the active tab at a time.
+- Search response listeners are detached after each search/preflight to avoid stale captures on the reused page.
+- Normal search no longer reloads `jingxuan` when the active tab is already on Douyin; it waits briefly and edits the current search box when possible.

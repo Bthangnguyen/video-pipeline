@@ -9,6 +9,7 @@ from app.douyinsearch.config import settings as douyin_settings
 from app.douyinsearch.cookies import cookie_header_from_file as douyin_cookie_header_from_file
 from app.douyinsearch.errors import DouyinSearchError
 from app.douyinsearch.schemas import SearchRequest
+from app.douyinsearch.stream_proxy import no_watermark_url_from_result
 from app.douyinsearch.service import douyin_service
 from app.pinterestsearch.config import settings as pinterest_settings
 from app.pinterestsearch.cookies import cookie_header_from_file as pinterest_cookie_header_from_file
@@ -36,6 +37,7 @@ from app.videodesign.schemas import (
     KeywordGenerateRequest,
     MaterialsDownloadRequest,
     MaterialsPreflightRequest,
+    MaterialsPruneRequest,
     MaterialsSearchRequest,
     MaterialAsset,
     MediaCandidate,
@@ -119,6 +121,7 @@ class VideoDesignService:
             "storage_dir": str(settings.storage_dir),
             "deepseek_configured": bool(settings.deepseek_api_key),
             "tts_provider": settings.tts_provider,
+            "redis_enabled": self.store.redis.enabled,
         }
 
     def create_project(self, request: CreateProjectRequest) -> dict:
@@ -286,7 +289,13 @@ class VideoDesignService:
         total = len(scenes)
         douyin_limit = request.douyin_min_per_scene if request.douyin_min_per_scene is not None else request.candidates_per_scene
         pinterest_limit = request.pinterest_min_per_scene
-        self._set_progress(project, "materials_search", "Starting material search.", 0, total)
+        scene_ids = {scene.scene_id for scene in scenes}
+        project.search_tasks = [task for task in project.search_tasks if task.scene_id not in scene_ids]
+        for scene in scenes:
+            scene.search_tasks = []
+        self._set_progress(project, "materials_search", "Preparing material search jobs.", 0, total)
+
+        plans = []
         for index, scene in enumerate(scenes, start=1):
             scene.approval_state = "searching"
             keywords = await self._keywords_for_scene(project, scene, request)
@@ -297,11 +306,44 @@ class VideoDesignService:
             for source, source_limit in source_plan:
                 if source_limit <= 0:
                     continue
-                for keyword in keywords[: request.queries_per_scene]:
+                if len(_candidates_for_scene(project, scene.scene_id, source)) >= source_limit:
+                    continue
+                plans.append(
+                    {
+                        "index": index,
+                        "scene": scene,
+                        "source": source,
+                        "source_limit": source_limit,
+                        "keywords": keywords[: request.queries_per_scene],
+                    }
+                )
+
+        self.store.put(project)
+        if not plans:
+            for scene in scenes:
+                scene.approval_state = "needs_review" if _candidates_for_scene(project, scene.scene_id) else "planned"
+            self.store.put(project)
+            self._set_progress(project, "idle", "Material search finished.", total, total)
+            return self.review(project_id)
+
+        completed = 0
+        progress_total = len(plans)
+        lock = asyncio.Lock()
+        semaphores = {
+            "douyinsearch": asyncio.Semaphore(1),
+            "pinterestsearch": asyncio.Semaphore(4),
+        }
+
+        async def run_plan(plan: dict) -> None:
+            nonlocal completed
+            scene = plan["scene"]
+            source = plan["source"]
+            async with semaphores[source]:
+                for keyword in plan["keywords"]:
                     existing_count = len(_candidates_for_scene(project, scene.scene_id, source))
-                    if existing_count >= source_limit:
+                    if existing_count >= plan["source_limit"]:
                         break
-                    needed = source_limit - existing_count
+                    needed = plan["source_limit"] - existing_count
                     task = DouyinSearchTask(
                         search_task_id=f"dst_{uuid.uuid4().hex}",
                         project_id=project.project_id,
@@ -312,16 +354,18 @@ class VideoDesignService:
                         limit=max(needed, 3),
                         status="searching",
                     )
-                    project.search_tasks.append(task)
-                    scene.search_tasks.append(task.search_task_id)
-                    self._set_progress(
-                        project,
-                        "materials_search",
-                        f"Searching {source_label(source)} scene {index}/{total}: {keyword}",
-                        index - 1,
-                        total,
-                        {"scene_id": scene.scene_id, "keyword": keyword, "source": source},
-                    )
+                    async with lock:
+                        project.search_tasks.append(task)
+                        scene.search_tasks.append(task.search_task_id)
+                        self._set_progress(
+                            project,
+                            "materials_search",
+                            f"Searching {source_label(source)} scene {plan['index']}/{total}: {keyword}",
+                            completed,
+                            progress_total,
+                            {"scene_id": scene.scene_id, "keyword": keyword, "source": source},
+                        )
+                        self.store.put(project)
                     try:
                         if source == "douyinsearch":
                             response = await asyncio.wait_for(
@@ -347,37 +391,49 @@ class VideoDesignService:
                                 ),
                                 timeout=90,
                             )
-                        task.status = "completed"
-                        candidate_ids = _add_candidates(project, scene, response.items, needed, source, keyword)
-                        task.candidate_ids.extend(candidate_ids)
-                        if candidate_ids:
-                            scene.approval_state = "needs_review"
+                        async with lock:
+                            candidate_ids = _add_candidates(project, scene, response.items, needed, source, keyword)
+                            task.status = "completed"
+                            task.candidate_ids.extend(candidate_ids)
+                            if candidate_ids:
+                                scene.approval_state = "needs_review"
+                            self.store.put(project)
                     except asyncio.TimeoutError:
-                        task.status = "failed"
-                        task.error = {
-                            "code": MATERIAL_SEARCH_TIMEOUT,
-                            "message": f"{source_label(source)} search timed out for keyword '{keyword}'.",
-                            "retryable": True,
-                        }
+                        async with lock:
+                            task.status = "failed"
+                            task.error = {
+                                "code": MATERIAL_SEARCH_TIMEOUT,
+                                "message": f"{source_label(source)} search timed out for keyword '{keyword}'.",
+                                "retryable": True,
+                            }
+                            self.store.put(project)
                     except (DouyinSearchError, PinterestSearchError) as error:
-                        task.status = "failed"
-                        task.error = error.to_payload()
+                        async with lock:
+                            task.status = "failed"
+                            task.error = error.to_payload()
+                            self.store.put(project)
                     except Exception as exc:
-                        task.status = "failed"
-                        task.error = {"code": MATERIAL_SEARCH_FAILED, "message": str(exc), "retryable": True}
-                    finally:
-                        self.store.put(project)
+                        async with lock:
+                            task.status = "failed"
+                            task.error = {"code": MATERIAL_SEARCH_FAILED, "message": str(exc), "retryable": True}
+                            self.store.put(project)
+            async with lock:
+                completed += 1
+                self._set_progress(
+                    project,
+                    "materials_search",
+                    f"Finished {source_label(source)} scene {plan['index']}/{total}: {len(_candidates_for_scene(project, scene.scene_id, source))} candidates.",
+                    completed,
+                    progress_total,
+                    {"scene_id": scene.scene_id, "source": source},
+                )
+                self.store.put(project)
+
+        await asyncio.gather(*(run_plan(plan) for plan in plans))
+        for scene in scenes:
             scene.approval_state = "needs_review" if _candidates_for_scene(project, scene.scene_id) else "planned"
-            self._set_progress(
-                project,
-                "materials_search",
-                f"Finished scene {index}/{total}: {len(_candidates_for_scene(project, scene.scene_id))} candidates.",
-                index,
-                total,
-                {"scene_id": scene.scene_id},
-            )
         self.store.put(project)
-        self._set_progress(project, "idle", "Material search finished.", total, total)
+        self._set_progress(project, "idle", "Material search finished.", progress_total, progress_total)
         return self.review(project_id)
 
     async def materials_preflight(self, request: MaterialsPreflightRequest) -> dict:
@@ -432,12 +488,19 @@ class VideoDesignService:
             scene.selected_candidate_id = None
         elif request.action == "reject":
             candidate = _candidate(project, request.candidate_id)
+            if candidate.scene_id != scene.scene_id:
+                raise VideoDesignError(CANDIDATE_NOT_FOUND, "Candidate does not belong to this scene.")
             candidate.status = "rejected"
             if scene.selected_candidate_id == candidate.candidate_id:
                 scene.selected_candidate_id = None
-            scene.approval_state = "needs_review"
+            scene.approval_state = "needs_review" if _candidates_for_scene(project, scene.scene_id) else "planned"
         elif request.action == "approve":
             candidate = _candidate(project, request.candidate_id)
+            if candidate.scene_id != scene.scene_id:
+                raise VideoDesignError(CANDIDATE_NOT_FOUND, "Candidate does not belong to this scene.")
+            for item in project.candidates:
+                if item.scene_id == scene.scene_id and item.candidate_id != candidate.candidate_id and item.status == "approved":
+                    item.status = "proposed"
             candidate.status = "approved"
             scene.selected_candidate_id = candidate.candidate_id
             scene.approval_state = "approved"
@@ -445,6 +508,9 @@ class VideoDesignService:
             if not request.douyin_result_id:
                 raise VideoDesignError(CANDIDATE_NOT_FOUND, "douyin_result_id is required for manual selection.")
             result = douyin_service.get_result(request.douyin_result_id)["item"]
+            for item in project.candidates:
+                if item.scene_id == scene.scene_id and item.status == "approved":
+                    item.status = "proposed"
             candidate = _candidate_from_public_result(scene, result, len(project.candidates) + 1)
             candidate.status = "approved"
             project.candidates.append(candidate)
@@ -457,20 +523,22 @@ class VideoDesignService:
         project = self.store.get(project_id)
         scenes = _selected_scenes(project, request.scene_ids)
         downloaded = []
+        skipped = []
         for scene in scenes:
             if scene.material_asset_id and not request.force:
                 downloaded.append(_asset(project, scene.material_asset_id).model_dump())
                 continue
-            if scene.approval_state not in ("approved", "download_pending", "downloaded") or not scene.selected_candidate_id:
-                raise VideoDesignError(SCENE_NOT_READY, f"Scene {scene.scene_id} has no approved candidate.")
-            candidate = _candidate(project, scene.selected_candidate_id)
+            candidate = _approved_candidate_for_scene(project, scene)
+            if not candidate:
+                skipped.append({"scene_id": scene.scene_id, "code": SCENE_NOT_READY, "message": "Scene has no approved candidate."})
+                continue
             scene.approval_state = "download_pending"
             asset_id = f"mat_{uuid.uuid4().hex}"
             output_path = settings.storage_dir / project.project_id / "materials" / f"{scene.scene_id}.mp4"
             try:
                 await self._download_candidate(candidate, output_path)
             except Exception as exc:
-                scene.approval_state = "needs_review"
+                scene.approval_state = "approved"
                 raise VideoDesignError(DOWNLOAD_FAILED, f"Could not download approved video: {exc}", retryable=True) from exc
             asset = MaterialAsset(
                 asset_id=asset_id,
@@ -492,7 +560,38 @@ class VideoDesignService:
             scene.approval_state = "downloaded"
             downloaded.append(asset.model_dump())
         self.store.put(project)
-        return {"success": True, "assets": downloaded}
+        return {"success": True, "assets": downloaded, "skipped": skipped}
+
+    def prune_material_candidates(self, project_id: str, request: MaterialsPruneRequest) -> dict:
+        project = self.store.get(project_id)
+        scenes = _selected_scenes(project, request.scene_ids)
+        selected_by_scene = {scene.scene_id: scene.selected_candidate_id for scene in scenes if scene.selected_candidate_id}
+        if not selected_by_scene:
+            return {"success": True, "removed": 0, "kept": 0, "scene_ids": []}
+
+        removed_ids = []
+        kept = []
+        for candidate in project.candidates:
+            selected_id = selected_by_scene.get(candidate.scene_id)
+            if selected_id and candidate.candidate_id != selected_id:
+                removed_ids.append(candidate.candidate_id)
+                continue
+            kept.append(candidate)
+        project.candidates = kept
+        for scene in scenes:
+            candidate = _approved_candidate_for_scene(project, scene)
+            if candidate:
+                scene.approval_state = "downloaded" if scene.material_asset_id else "approved"
+            elif scene.selected_candidate_id:
+                scene.selected_candidate_id = None
+                scene.approval_state = "planned"
+        self.store.put(project)
+        return {
+            "success": True,
+            "removed": len(removed_ids),
+            "kept": len(selected_by_scene),
+            "scene_ids": list(selected_by_scene.keys()),
+        }
 
     async def _download_candidate(self, candidate: MediaCandidate, output_path: Path) -> None:
         ytdlp_error = None
@@ -519,9 +618,17 @@ class VideoDesignService:
                 await pinterest_service.media_proxy.download_to_file(result, output_path)
             else:
                 result = douyin_service.store.get(candidate.source_result_id or candidate.douyin_result_id)
-                if not result:
-                    raise VideoDesignError(DOWNLOAD_FAILED, "Douyin result expired.", retryable=True)
-                await douyin_service.stream_proxy.download_to_file(result, output_path)
+                if result:
+                    await douyin_service.stream_proxy.download_to_file(result, output_path)
+                else:
+                    remote_url = candidate.remote_download_url or candidate.remote_stream_url
+                    if not remote_url:
+                        raise VideoDesignError(
+                            DOWNLOAD_FAILED,
+                            "Douyin result expired and this candidate has no stored media URL. Re-search this scene before downloading.",
+                            retryable=True,
+                        )
+                    await douyin_service.stream_proxy.download_url_to_file(remote_url, output_path)
         except Exception as exc:
             if ytdlp_error:
                 raise VideoDesignError(
@@ -726,6 +833,18 @@ def _candidate(project: VideoDesignProject, candidate_id: str | None) -> MediaCa
     raise VideoDesignError(CANDIDATE_NOT_FOUND, "Candidate does not exist.")
 
 
+def _approved_candidate_for_scene(project: VideoDesignProject, scene: ScenePlan) -> MediaCandidate | None:
+    if not scene.selected_candidate_id:
+        return None
+    try:
+        candidate = _candidate(project, scene.selected_candidate_id)
+    except VideoDesignError:
+        return None
+    if candidate.scene_id != scene.scene_id or candidate.status != "approved":
+        return None
+    return candidate
+
+
 def _asset(project: VideoDesignProject, asset_id: str) -> MaterialAsset:
     for asset in project.material_assets:
         if asset.asset_id == asset_id:
@@ -772,6 +891,13 @@ def _candidate_from_public_result(
     title = result.title or result.description or source_item_id
     duration = float(getattr(result, "duration", 0) or 0)
     douyin_aweme_id = source_item_id if source == "douyinsearch" else ""
+    remote_stream_url = ""
+    remote_download_url = ""
+    if source == "douyinsearch":
+        stored_result = douyin_service.store.get(result.result_id)
+        if stored_result:
+            remote_stream_url = stored_result.stream_remote_url
+            remote_download_url = no_watermark_url_from_result(stored_result)
     return MediaCandidate(
         candidate_id=f"cand_{uuid.uuid4().hex}",
         source=source,
@@ -785,7 +911,10 @@ def _candidate_from_public_result(
         title=title,
         cover_url=result.cover_url,
         stream_url=result.stream_url,
+        media_url=str(getattr(result, "media_url", "") or ""),
         download_url=result.download_url,
+        remote_stream_url=remote_stream_url,
+        remote_download_url=remote_download_url,
         duration=duration,
         match_reason=f"{source_label(source)} result {index} for scene {scene.order}.",
     )

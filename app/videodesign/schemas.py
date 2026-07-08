@@ -84,7 +84,10 @@ class MediaCandidate(BaseModel):
     title: str = ""
     cover_url: str = ""
     stream_url: str = ""
+    media_url: str = ""
     download_url: str = ""
+    remote_stream_url: str = ""
+    remote_download_url: str = ""
     duration: float = 0
     match_reason: str = ""
     status: CandidateStatus = "proposed"
@@ -217,6 +220,10 @@ class SceneSelectionRequest(BaseModel):
 class MaterialsDownloadRequest(BaseModel):
     scene_ids: list[str] | None = None
     force: bool = False
+
+
+class MaterialsPruneRequest(BaseModel):
+    scene_ids: list[str] | None = None
 
 
 class TimelineItemPatch(BaseModel):
