@@ -994,6 +994,13 @@ textarea {
   gap: 12px;
 }
 
+.vd-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .vd-panel h2 {
   font-size: 22px;
 }
@@ -1053,6 +1060,17 @@ textarea {
   background: #d94d3f;
   color: #ffffff;
   font-weight: 800;
+}
+
+.vd-app-page .vd-danger {
+  border-color: #efb4aa;
+  background: #fff2ef;
+  color: #a43a2f;
+}
+
+.vd-app-page .vd-danger:hover {
+  border-color: #d94d3f;
+  color: #81251f;
 }
 
 .vd-option-grid,

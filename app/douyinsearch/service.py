@@ -18,7 +18,12 @@ from app.douyinsearch.stream_proxy import StreamProxy
 class DouyinSearchService:
     def __init__(self):
         self.store = ResultStore(settings.result_ttl_seconds)
-        self.browser = BrowserClient(settings.cookie_file, settings.browser_headless, settings.debug)
+        self.browser = BrowserClient(
+            settings.cookie_file,
+            settings.browser_headless,
+            settings.debug,
+            settings.browser_profile_dir,
+        )
         self.direct_api = DirectApiClient()
         self.stream_proxy = StreamProxy(settings.cookie_file)
 
@@ -28,6 +33,9 @@ class DouyinSearchService:
             "module": "douyinsearch",
             "browser_ready": True,
             "cookie_file_exists": settings.cookie_file.exists(),
+            "browser_profile_dir": str(settings.browser_profile_dir),
+            "browser_profile_exists": settings.browser_profile_dir.exists(),
+            "browser_visible_for_login": True,
         }
 
     async def check_session(self) -> dict:

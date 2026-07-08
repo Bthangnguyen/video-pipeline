@@ -103,6 +103,8 @@ function bindEvents() {
   document.getElementById("search-all-scenes").addEventListener("click", searchAllScenes);
   document.getElementById("save-material-keywords").addEventListener("click", saveMaterialKeywords);
   document.getElementById("run-material-health").addEventListener("click", runMaterialHealth);
+  document.getElementById("clear-scene-candidates").addEventListener("click", clearSelectedSceneCandidates);
+  document.getElementById("clear-all-candidates").addEventListener("click", clearAllCandidates);
   document.getElementById("download-approved").addEventListener("click", downloadApproved);
 
   document.getElementById("create-timeline").addEventListener("click", createTimeline);
@@ -453,6 +455,57 @@ async function approveCandidate(sceneId, candidateId) {
   });
 }
 
+async function deleteCandidate(sceneId, candidateId) {
+  await run("Deleting candidate", async () => {
+    await rejectCandidate(sceneId, candidateId);
+    if (state.previewCandidateId === candidateId) state.previewCandidateId = "";
+    await loadReview();
+  });
+}
+
+async function clearSelectedSceneCandidates() {
+  const row = selectedRow();
+  if (!row) {
+    setStatus("Select a scene first.", "error");
+    return;
+  }
+  if (!row.candidates.length) {
+    setStatus("This scene has no videos to clear.", "idle");
+    return;
+  }
+  if (!window.confirm(`Clear ${row.candidates.length} videos from Scene ${row.scene.order}?`)) return;
+  await run("Clearing scene videos", async () => {
+    for (const candidate of row.candidates) {
+      await rejectCandidate(row.scene.scene_id, candidate.candidate_id);
+    }
+    state.previewCandidateId = "";
+    await loadReview();
+  });
+}
+
+async function clearAllCandidates() {
+  const candidates = state.rows.flatMap((row) => row.candidates.map((candidate) => ({ ...candidate, scene_id: row.scene.scene_id })));
+  if (!candidates.length) {
+    setStatus("There are no videos to clear.", "idle");
+    return;
+  }
+  if (!window.confirm(`Clear all ${candidates.length} material videos from this project?`)) return;
+  await run("Clearing all material videos", async () => {
+    for (const candidate of candidates) {
+      await rejectCandidate(candidate.scene_id, candidate.candidate_id);
+    }
+    state.previewCandidateId = "";
+    await loadReview();
+  });
+}
+
+async function rejectCandidate(sceneId, candidateId) {
+  await api(`/api/videodesign/projects/${state.projectId}/scenes/${sceneId}/selection`, {
+    method: "PATCH",
+    body: { action: "reject", candidate_id: candidateId },
+  });
+}
+
 async function allowPlaceholder(sceneId) {
   await run("Allowing placeholder", async () => {
     await api(`/api/videodesign/projects/${state.projectId}/scenes/${sceneId}/selection`, {
@@ -683,6 +736,9 @@ function renderCandidateBoard() {
   board.querySelectorAll("[data-preview-candidate]").forEach((button) => {
     button.addEventListener("click", () => previewCandidate(button.dataset.previewCandidate));
   });
+  board.querySelectorAll("[data-delete-candidate]").forEach((button) => {
+    button.addEventListener("click", () => deleteCandidate(button.dataset.deleteScene, button.dataset.deleteCandidate));
+  });
 }
 
 function candidateCards(candidates, row, source) {
@@ -698,6 +754,7 @@ function candidateCards(candidates, row, source) {
         <div class="vd-button-row">
           <button data-approve-candidate="${candidate.candidate_id}" data-approve-scene="${row.scene.scene_id}" type="button">${candidate.status === "approved" ? "Approved" : "Approve"}</button>
           <button data-preview-candidate="${candidate.candidate_id}" type="button">Preview</button>
+          <button data-delete-candidate="${candidate.candidate_id}" data-delete-scene="${row.scene.scene_id}" class="vd-danger" type="button">Delete</button>
         </div>
       </div>
     </article>
