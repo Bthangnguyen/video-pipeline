@@ -13,6 +13,8 @@ from app.videodesign.schemas import (
     MaterialsSearchRequest,
     SceneClipPatch,
     SceneSelectionRequest,
+    SFXApplyRequest,
+    SFXSuggestRequest,
     ScriptGenerateRequest,
     SplitSettings,
     TimelineItemCreateRequest,
@@ -286,6 +288,46 @@ async def timeline(project_id: str):
 async def clear_timeline(project_id: str):
     try:
         return videodesign_service.clear_timeline(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/sfx/catalog")
+async def sfx_catalog():
+    try:
+        return videodesign_service.sfx_catalog()
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/sfx/{asset_id}/file")
+async def sfx_file(asset_id: str):
+    try:
+        return FileResponse(videodesign_service.sfx_file_path(asset_id), media_type="audio/wav")
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/sfx/suggest")
+async def suggest_sfx(project_id: str, request: SFXSuggestRequest):
+    try:
+        return videodesign_service.suggest_sfx(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/sfx/suggestions")
+async def sfx_suggestions(project_id: str):
+    try:
+        return videodesign_service.sfx_suggestions(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/sfx/apply")
+async def apply_sfx(project_id: str, request: SFXApplyRequest):
+    try:
+        return videodesign_service.apply_sfx_suggestions(project_id, request)
     except VideoDesignError as error:
         return error_response(error)
 

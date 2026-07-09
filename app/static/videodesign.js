@@ -9,6 +9,9 @@ const state = {
   previewCandidateId: "",
   smoothPreview: defaultSmoothPreview(),
   previewMode: "realtime",
+  sfxCatalog: [],
+  sfxSuggestions: [],
+  sfxCatalogLoading: false,
   materialHealth: null,
   materialCoverCache: {},
   selectedTool: "script",
@@ -16,6 +19,7 @@ const state = {
   timelinePixelsPerSecond: 48,
   timelinePlayheadSeconds: 0,
   timelinePlaying: false,
+  playedSfxIds: new Set(),
   running: false,
   lastProgressMessage: "",
   preset: defaultPreset(),
@@ -365,6 +369,7 @@ async function loadTimeline() {
   const data = await api(`/api/videodesign/projects/${state.projectId}/timeline`);
   state.timeline = data.timeline;
   await loadSmoothPreview({ render: false });
+  await loadSfxSuggestions({ render: false });
   if (state.timeline && !state.selectedItemId) {
     const firstText = state.timeline.items.find((item) => item.type === "text");
     state.selectedItemId = firstText?.item_id || state.timeline.items[0]?.item_id || "";
@@ -381,6 +386,27 @@ async function loadSmoothPreview(options = {}) {
   }
   if (options.render !== false) renderStudio();
   return state.smoothPreview;
+}
+
+async function loadSfxCatalog(options = {}) {
+  if (state.sfxCatalogLoading || state.sfxCatalog.length) return state.sfxCatalog;
+  state.sfxCatalogLoading = true;
+  try {
+    const data = await api("/api/videodesign/sfx/catalog");
+    state.sfxCatalog = data.items || [];
+    if (options.render !== false) renderStudio();
+  } finally {
+    state.sfxCatalogLoading = false;
+  }
+  return state.sfxCatalog;
+}
+
+async function loadSfxSuggestions(options = {}) {
+  if (!state.projectId) return [];
+  const data = await api(`/api/videodesign/projects/${state.projectId}/sfx/suggestions`);
+  state.sfxSuggestions = data.suggestions || [];
+  if (options.render !== false) renderStudio();
+  return state.sfxSuggestions;
 }
 
 async function saveSelectedScene() {
@@ -637,6 +663,7 @@ async function createTimeline() {
     const data = await api(`/api/videodesign/projects/${state.projectId}/studio`, { method: "POST" });
     state.timeline = data.timeline;
     await loadSmoothPreview({ render: false });
+    await loadSfxSuggestions({ render: false });
     const firstMedia = state.timeline.items.find((item) => item.type === "media");
     state.selectedItemId = firstMedia?.item_id || state.timeline.items[0]?.item_id || "";
     if (firstMedia) {
@@ -1229,6 +1256,8 @@ function renderStudioToolPanel() {
     renderTransitionsPanel(panel, row);
   } else if (state.selectedTool === "icons") {
     renderIconsPanel(panel, row);
+  } else if (state.selectedTool === "audio") {
+    renderAudioPanel(panel);
   } else {
     panel.innerHTML = `<h3>${escapeHtml(titleCase(state.selectedTool))}</h3><p class="vd-muted">Controls for this tool will build on the selected timeline item.</p>`;
   }
@@ -1398,6 +1427,137 @@ function renderIconsPanel(panel, row) {
   });
   panel.querySelector("#save-icon")?.addEventListener("click", () => saveIcon(panel, item));
   panel.querySelector("#delete-icon")?.addEventListener("click", () => deleteTimelineItem(item?.item_id));
+}
+
+function renderAudioPanel(panel) {
+  if (!state.timeline) {
+    panel.innerHTML = `<h3>Audio</h3><p class="vd-muted">Create a timeline before adding SFX.</p>`;
+    return;
+  }
+  if (!state.sfxCatalog.length && !state.sfxCatalogLoading) {
+    loadSfxCatalog({ render: true }).catch(() => {});
+  }
+  const sfxItems = timelineItems().filter((item) => item.type === "sfx");
+  const proposed = state.sfxSuggestions.filter((item) => item.status === "proposed");
+  const applied = state.sfxSuggestions.filter((item) => item.status === "applied");
+  panel.innerHTML = `
+    <h3>Audio</h3>
+    <section class="vd-audio-section">
+      <strong>Event-driven SFX</strong>
+      <p class="vd-muted">Suggestions come from transitions, text, icons, hook moments, and important caption words.</p>
+      <div class="vd-button-row">
+        <button id="generate-sfx" class="vd-primary" type="button">Generate SFX suggestions</button>
+        <button id="apply-sfx" type="button" ${proposed.length ? "" : "disabled"}>Apply selected</button>
+        <button id="clear-sfx" class="vd-danger" type="button" ${sfxItems.length ? "" : "disabled"}>Clear SFX</button>
+      </div>
+      <div class="vd-summary-row"><span>Timeline SFX</span><strong>${sfxItems.length}</strong></div>
+      <div class="vd-summary-row"><span>Suggestions</span><strong>${proposed.length} proposed / ${applied.length} applied</strong></div>
+    </section>
+    <section class="vd-audio-section">
+      <strong>Suggestions</strong>
+      ${proposed.length ? proposed.map((suggestion) => sfxSuggestionRow(suggestion)).join("") : `<div class="vd-empty">Generate suggestions to place SFX automatically.</div>`}
+    </section>
+    <section class="vd-audio-section">
+      <strong>SFX catalog</strong>
+      ${state.sfxCatalog.length ? state.sfxCatalog.map((asset) => `
+        <div class="vd-sfx-row">
+          <div>
+            <b>${escapeHtml(asset.name)}</b>
+            <span>${escapeHtml(asset.category)} / ${formatDuration(asset.duration_seconds || 0)}</span>
+          </div>
+          <button data-preview-sfx="${asset.asset_id}" type="button">Play</button>
+        </div>
+      `).join("") : `<div class="vd-muted">Loading SFX catalog...</div>`}
+    </section>
+  `;
+  panel.querySelector("#generate-sfx")?.addEventListener("click", generateSfxSuggestions);
+  panel.querySelector("#apply-sfx")?.addEventListener("click", applySelectedSfxSuggestions);
+  panel.querySelector("#clear-sfx")?.addEventListener("click", clearTimelineSfx);
+  panel.querySelectorAll("[data-preview-sfx]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      previewSfx(button.dataset.previewSfx);
+    });
+  });
+}
+
+function sfxSuggestionRow(suggestion) {
+  const asset = sfxAsset(suggestion.asset_id);
+  return `
+    <label class="vd-sfx-row">
+      <input data-sfx-suggestion-id="${suggestion.suggestion_id}" type="checkbox" checked>
+      <div>
+        <b>${escapeHtml(suggestion.label)}</b>
+        <span>${formatDuration(suggestion.time_seconds)} / ${escapeHtml(suggestion.event_type.replaceAll("_", " "))}</span>
+        <em>${escapeHtml(suggestion.reason)}</em>
+      </div>
+      <button data-preview-sfx="${suggestion.asset_id}" type="button">${escapeHtml(asset?.name || suggestion.asset_id)}</button>
+    </label>
+  `;
+}
+
+async function generateSfxSuggestions() {
+  await run("Generating SFX suggestions", async () => {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/sfx/suggest`, {
+      method: "POST",
+      body: {
+        max_suggestions: 12,
+        include_caption_words: true,
+        include_transitions: true,
+        include_icons: true,
+        include_text: true,
+        include_hook: true,
+      },
+    });
+    state.sfxSuggestions = data.suggestions || [];
+    await loadSfxCatalog({ render: false });
+    setStatus(`Generated ${state.sfxSuggestions.length} SFX suggestion(s).`, "idle");
+  });
+}
+
+async function applySelectedSfxSuggestions() {
+  const ids = Array.from(document.querySelectorAll("[data-sfx-suggestion-id]:checked")).map((input) => input.dataset.sfxSuggestionId);
+  if (!ids.length) {
+    setStatus("Select at least one SFX suggestion.", "error");
+    return;
+  }
+  await run("Applying SFX", async () => {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/sfx/apply`, {
+      method: "POST",
+      body: { suggestion_ids: ids },
+    });
+    state.timeline = data.timeline;
+    state.sfxSuggestions = data.suggestions || state.sfxSuggestions;
+    markSmoothPreviewStale();
+    setStatus(`Applied ${data.applied?.length || 0} SFX item(s).`, "idle");
+  });
+}
+
+async function clearTimelineSfx() {
+  const items = timelineItems().filter((item) => item.type === "sfx");
+  if (!items.length) return;
+  if (!window.confirm(`Remove ${items.length} SFX item(s) from the timeline?`)) return;
+  await run("Clearing SFX", async () => {
+    for (const item of items) {
+      await deleteTimelineItem(item.item_id, false);
+    }
+    await loadTimeline();
+    markSmoothPreviewStale();
+  });
+}
+
+function previewSfx(assetId) {
+  const asset = sfxAsset(assetId);
+  const url = asset?.audio_url || `/api/videodesign/sfx/${assetId}/file`;
+  const audio = new Audio(url);
+  audio.volume = Math.min(0.8, Number(asset?.default_volume || 0.35) * 1.4);
+  const promise = audio.play();
+  if (promise?.catch) promise.catch(() => setStatus("Browser blocked SFX preview. Try clicking Play again.", "error"));
+}
+
+function sfxAsset(assetId) {
+  return state.sfxCatalog.find((asset) => asset.asset_id === assetId) || null;
 }
 
 function itemForScene(type, row = selectedRow()) {
@@ -2285,7 +2445,7 @@ function niceTimelineStep(rawStep) {
 }
 
 function editableTimelineItem(item) {
-  return ["media", "text", "caption", "overlay", "icon", "transition"].includes(item?.type);
+  return ["media", "text", "caption", "overlay", "icon", "transition", "sfx"].includes(item?.type);
 }
 
 function fitTimeline() {
@@ -2320,6 +2480,7 @@ function seekTimelineFromPointer(event) {
 
 function seekTimeline(globalTime, options = {}) {
   if (!state.timeline) return;
+  if (!options.autoplay) state.playedSfxIds.clear();
   const duration = Math.max(1, state.timeline.duration_seconds || 1);
   const time = clamp(Number(globalTime || 0), 0, duration);
   state.timelinePlayheadSeconds = time;
@@ -2526,6 +2687,7 @@ function timelineClipLabel(item) {
   if (item?.type === "media") return trimStatusLabel(item);
   if (item?.type === "icon") return iconLabel(item.source_ref?.icon_id || "icon");
   if (item?.type === "overlay") return overlayLabel(overlayIdForItem(item));
+  if (item?.type === "sfx") return item.source_ref?.label || sfxAsset(item.source_ref?.asset_id)?.name || "SFX";
   if (item?.type === "transition") return transitionLabel(transitionIdForItem(item));
   return itemLabel(item);
 }
@@ -3062,6 +3224,7 @@ function selectFirstItemForScene(sceneId) {
     overlay: "overlay",
     transitions: "transition",
     icons: "icon",
+    audio: "sfx",
   }[state.selectedTool] || "text";
   const item = timelineItems().find((entry) => entry.scene_id === sceneId && entry.type === preferredType)
     || timelineItems().find((entry) => entry.scene_id === sceneId && entry.type === "media")
@@ -3097,6 +3260,7 @@ function studioToolForItem(item) {
     overlay: "overlay",
     transition: "transitions",
     icon: "icons",
+    sfx: "audio",
   }[item?.type] || null;
 }
 
@@ -3121,6 +3285,7 @@ function toggleStudioPlayback() {
 
 function playTimelineFrom(globalTime) {
   state.timelinePlaying = true;
+  state.playedSfxIds.clear();
   seekTimeline(globalTime, { autoplay: true });
   startTimelineFrameTicker();
   updateStudioPlaybackButton();
@@ -3288,9 +3453,34 @@ function updateStudioClock(forcedGlobalTime = null) {
   state.timelinePlayheadSeconds = clamp(globalTime, 0, Math.max(1, state.timeline?.duration_seconds || 1));
   updateCaptionPreview(state.timelinePlayheadSeconds);
   applyTransitionPreview(state.timelinePlayheadSeconds);
+  triggerRealtimeSfx(state.timelinePlayheadSeconds);
   const time = document.getElementById("studio-time");
   if (time) time.textContent = state.timeline ? `${formatDuration(state.timelinePlayheadSeconds)} / ${formatDuration(state.timeline.duration_seconds)}` : "0:00";
   updateTimelinePlayhead(state.timelinePlayheadSeconds);
+}
+
+function triggerRealtimeSfx(globalTime) {
+  if (!state.timelinePlaying || smoothPreviewActive()) return;
+  const windowStart = Number(globalTime || 0) - 0.04;
+  const windowEnd = Number(globalTime || 0) + 0.12;
+  const dueItems = timelineItems().filter((item) => {
+    if (item.type !== "sfx" || item.style?.enabled === false || state.playedSfxIds.has(item.item_id)) return false;
+    return item.start_seconds >= windowStart && item.start_seconds <= windowEnd;
+  });
+  for (const item of dueItems) {
+    state.playedSfxIds.add(item.item_id);
+    playTimelineSfx(item);
+  }
+}
+
+function playTimelineSfx(item) {
+  const asset = sfxAsset(item.source_ref?.asset_id);
+  const url = asset?.audio_url || item.source_ref?.audio_url || "";
+  if (!url) return;
+  const audio = new Audio(url);
+  audio.volume = clamp(Number(item.style?.volume ?? asset?.default_volume ?? 0.35), 0, 1);
+  const promise = audio.play();
+  if (promise?.catch) promise.catch(() => {});
 }
 
 function updateTimelinePlayhead(globalTime) {
@@ -3415,6 +3605,7 @@ function itemLabel(item) {
     overlay: "Overlay",
     icon: "Icon",
     audio: "Voice",
+    sfx: "SFX",
     transition: "Transition",
   }[item.type] || titleCase(item.type);
 }

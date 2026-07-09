@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 SplitMode = Literal["auto", "dense", "normal", "sparse", "manual"]
 ApprovalState = Literal["planned", "searching", "needs_review", "approved", "download_pending", "downloaded", "rejected", "placeholder_allowed"]
 CandidateStatus = Literal["proposed", "approved", "rejected"]
+SFXSuggestionStatus = Literal["proposed", "applied", "skipped"]
 
 
 class SplitSettings(BaseModel):
@@ -149,6 +150,32 @@ class MaterialAsset(BaseModel):
     download_state: str = "downloaded"
 
 
+class SFXAsset(BaseModel):
+    asset_id: str
+    name: str
+    category: str
+    audio_url: str
+    local_path: str
+    duration_seconds: float
+    default_volume: float = 0.35
+    recommended_events: list[str] = Field(default_factory=list)
+
+
+class SFXSuggestion(BaseModel):
+    suggestion_id: str
+    event_id: str
+    project_id: str
+    scene_id: str = ""
+    event_type: str
+    time_seconds: float
+    duration_hint_seconds: float
+    label: str
+    reason: str
+    asset_id: str
+    volume: float = 0.35
+    status: SFXSuggestionStatus = "proposed"
+
+
 class TimelineItem(BaseModel):
     item_id: str
     layer_id: str
@@ -214,6 +241,7 @@ class VideoDesignProject(BaseModel):
     search_tasks: list[DouyinSearchTask] = Field(default_factory=list)
     candidates: list[MediaCandidate] = Field(default_factory=list)
     material_assets: list[MaterialAsset] = Field(default_factory=list)
+    sfx_suggestions: list[SFXSuggestion] = Field(default_factory=list)
     timeline: TimelineDraft | None = None
     smooth_preview: SmoothPreview = Field(default_factory=SmoothPreview)
     voiceover_track: VoiceoverTrack = Field(default_factory=VoiceoverTrack)
@@ -304,7 +332,7 @@ class TimelineItemPatch(BaseModel):
 
 class TimelineItemCreateRequest(BaseModel):
     scene_id: str
-    type: Literal["text", "caption", "overlay", "icon", "transition"]
+    type: Literal["text", "caption", "overlay", "icon", "transition", "music", "sfx"]
     layer_id: str | None = None
     start_seconds: float | None = Field(default=None, ge=0)
     end_seconds: float | None = Field(default=None, ge=0)
@@ -316,3 +344,16 @@ class TimelineItemCreateRequest(BaseModel):
 class TransitionRequest(BaseModel):
     transition_id: str = "fade"
     duration_seconds: float = Field(default=0.35, ge=0.05, le=1.5)
+
+
+class SFXSuggestRequest(BaseModel):
+    max_suggestions: int = Field(default=12, ge=1, le=40)
+    include_caption_words: bool = True
+    include_transitions: bool = True
+    include_icons: bool = True
+    include_text: bool = True
+    include_hook: bool = True
+
+
+class SFXApplyRequest(BaseModel):
+    suggestion_ids: list[str] | None = None

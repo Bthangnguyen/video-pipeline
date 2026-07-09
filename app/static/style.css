@@ -1946,6 +1946,50 @@ textarea {
   color: #a7b3c4;
 }
 
+.vd-audio-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.vd-sfx-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.vd-sfx-row div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.vd-sfx-row b,
+.vd-sfx-row span,
+.vd-sfx-row em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vd-sfx-row span,
+.vd-sfx-row em {
+  color: #8391a8;
+  font-size: 12px;
+}
+
+.vd-sfx-row em {
+  font-style: normal;
+}
+
 .vd-studio-pro .vd-studio-panel input,
 .vd-studio-pro .vd-studio-panel textarea,
 .vd-studio-pro .vd-studio-panel select {
