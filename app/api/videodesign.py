@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import APIRouter, Body
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.videodesign.errors import PROJECT_NOT_FOUND, SCENE_NOT_FOUND, VideoDesignError
+from app.videodesign.errors import AUDIO_NOT_FOUND, PROJECT_NOT_FOUND, SCENE_NOT_FOUND, VideoDesignError
 from app.videodesign.schemas import (
     CreateProjectRequest,
     KeywordGenerateRequest,
@@ -131,6 +131,14 @@ async def generate_tts(project_id: str, request: TTSGenerateRequest):
         return error_response(error)
 
 
+@router.delete("/projects/{project_id}/tts")
+async def clear_tts(project_id: str):
+    try:
+        return videodesign_service.clear_tts(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
 @router.post("/projects/{project_id}/keywords/generate")
 async def generate_keywords(project_id: str, request: KeywordGenerateRequest):
     try:
@@ -147,8 +155,25 @@ async def scene_audio(project_id: str, scene_id: str):
         if not scene:
             raise VideoDesignError(SCENE_NOT_FOUND, "Scene does not exist.")
         if not scene.tts.audio_path:
-            raise VideoDesignError("AUDIO_NOT_FOUND", "Scene audio has not been generated.")
+            raise VideoDesignError(AUDIO_NOT_FOUND, "Scene audio has not been generated.")
         path = Path(scene.tts.audio_path)
+        return FileResponse(path, media_type="audio/mpeg" if path.suffix == ".mp3" else "audio/wav")
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/audio/combined")
+async def build_combined_voiceover(project_id: str):
+    try:
+        return videodesign_service.build_combined_voiceover(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/audio/combined")
+async def combined_voiceover(project_id: str):
+    try:
+        path = videodesign_service.combined_voiceover_path(project_id)
         return FileResponse(path, media_type="audio/mpeg" if path.suffix == ".mp3" else "audio/wav")
     except VideoDesignError as error:
         return error_response(error)
@@ -230,10 +255,21 @@ async def material_file(project_id: str, asset_id: str):
         return error_response(error)
 
 
+@router.get("/projects/{project_id}/materials/{asset_id}/proxy")
+async def material_proxy(project_id: str, asset_id: str):
+    try:
+        path = Path(videodesign_service.material_proxy_path(project_id, asset_id))
+        if not path.exists():
+            raise VideoDesignError("MATERIAL_FILE_NOT_FOUND", "Material preview proxy file does not exist.", retryable=True)
+        return FileResponse(path, media_type="video/mp4")
+    except VideoDesignError as error:
+        return error_response(error)
+
+
 @router.post("/projects/{project_id}/studio")
 async def create_studio(project_id: str):
     try:
-        return videodesign_service.create_studio_timeline(project_id)
+        return await videodesign_service.create_studio_timeline(project_id)
     except VideoDesignError as error:
         return error_response(error)
 
@@ -242,6 +278,14 @@ async def create_studio(project_id: str):
 async def timeline(project_id: str):
     try:
         return videodesign_service.timeline(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.delete("/projects/{project_id}/timeline")
+async def clear_timeline(project_id: str):
+    try:
+        return videodesign_service.clear_timeline(project_id)
     except VideoDesignError as error:
         return error_response(error)
 

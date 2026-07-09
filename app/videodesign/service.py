@@ -1,5 +1,6 @@
 import asyncio
 import re
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,9 +17,12 @@ from app.pinterestsearch.cookies import cookie_header_from_file as pinterest_coo
 from app.pinterestsearch.errors import PinterestSearchError
 from app.pinterestsearch.schemas import SearchRequest as PinterestSearchRequest
 from app.pinterestsearch.service import pinterest_service
+from app.videodesign.audio import concatenate_audio_files, measure_audio_duration
 from app.videodesign.config import settings
 from app.videodesign.downloader import YtDlpDownloader
 from app.videodesign.errors import (
+    AUDIO_COMBINE_FAILED,
+    AUDIO_NOT_FOUND,
     CANDIDATE_NOT_FOUND,
     DOWNLOAD_FAILED,
     INVALID_PROJECT_INPUT,
@@ -43,6 +47,7 @@ from app.videodesign.schemas import (
     MediaCandidate,
     SceneClip,
     SceneClipPatch,
+    SceneAudioOffset,
     ScenePlan,
     SceneSelectionRequest,
     ScriptGenerateRequest,
@@ -55,6 +60,7 @@ from app.videodesign.schemas import (
     TimelineItemPatch,
     TransitionRequest,
     VideoDesignProject,
+    VoiceoverTrack,
 )
 from app.videodesign.script_client import DeepSeekScriptClient
 from app.videodesign.store import VideoDesignStore
@@ -262,9 +268,12 @@ class VideoDesignService:
         project = self.store.get(project_id)
         provider = request.provider or project.tts_settings.provider
         voice_id = request.voice_id or project.tts_settings.voice_id
+        if not request.scene_ids:
+            return await self._generate_global_tts(project, provider, voice_id)
         scenes = _selected_scenes(project, request.scene_ids)
         for scene in scenes:
             text = scene.tts_text or scene.voiceover_text
+            _delete_project_file(project, scene.tts.audio_path)
             result = await self.tts_client.generate(text, project.project_id, scene.scene_id, provider, voice_id)
             previous_duration = scene.duration_seconds
             scene.duration_seconds = result.duration_seconds
@@ -276,10 +285,145 @@ class VideoDesignService:
                 voice_id=voice_id,
                 audio_url=f"/api/videodesign/projects/{project.project_id}/scenes/{scene.scene_id}/audio",
                 audio_path=str(result.audio_path),
+                duration_seconds=result.duration_seconds,
                 sync_state="synced",
             )
+        _delete_project_file(project, project.voiceover_track.audio_path)
+        project.voiceover_track = VoiceoverTrack()
         self.store.put(project)
-        return {"success": True, "scenes": [scene.model_dump() for scene in scenes]}
+        return {"success": True, "project": project.model_dump(), "scenes": [scene.model_dump() for scene in scenes]}
+
+    async def _generate_global_tts(self, project: VideoDesignProject, provider: str, voice_id: str) -> dict:
+        scenes = _renderable_scenes(project)
+        if not scenes:
+            raise VideoDesignError(SCENE_NOT_READY, "Project has no scenes for TTS.")
+        for scene in project.scenes:
+            _delete_project_file(project, scene.tts.audio_path)
+            scene.tts = TTSMeta()
+        _delete_project_file(project, project.voiceover_track.audio_path)
+
+        scene_texts = [scene.tts_text or scene.voiceover_text for scene in scenes]
+        full_text = " ".join(text.strip() for text in scene_texts if text.strip()).strip()
+        if not full_text:
+            raise VideoDesignError(SCRIPT_REQUIRED, "No scene voiceover text is available for TTS.")
+
+        result = await self.tts_client.generate(full_text, project.project_id, "global_voiceover", provider, voice_id)
+        offsets = _assign_global_tts_offsets(scenes, result.duration_seconds)
+        for scene, offset in zip(scenes, offsets):
+            duration = round(max(0.05, offset.end_seconds - offset.start_seconds), 3)
+            previous_duration = scene.duration_seconds
+            scene.duration_seconds = duration
+            if scene.clip and previous_duration and abs(scene.clip.duration_seconds - duration) > 0.05:
+                scene.clip.status = "trim_stale"
+            text = scene.caption_text or scene.tts_text or scene.voiceover_text
+            scene.caption_chunks = make_caption_chunks(text, duration)
+            scene.tts = TTSMeta(
+                provider=provider,
+                voice_id=voice_id,
+                duration_seconds=duration,
+                sync_state="synced",
+            )
+
+        project.voiceover_track = VoiceoverTrack(
+            audio_url=f"/api/videodesign/projects/{project.project_id}/audio/combined",
+            audio_path=str(result.audio_path),
+            duration_seconds=round(result.duration_seconds, 3),
+            scene_offsets=offsets,
+        )
+        project.timeline = None
+        self.store.put(project)
+        return {
+            "success": True,
+            "project": project.model_dump(),
+            "voiceover_track": project.voiceover_track.model_dump(),
+            "scenes": [scene.model_dump() for scene in scenes],
+        }
+
+    def clear_tts(self, project_id: str) -> dict:
+        project = self.store.get(project_id)
+        deleted = 0
+        for scene in project.scenes:
+            if _delete_project_file(project, scene.tts.audio_path):
+                deleted += 1
+            text = scene.tts_text or scene.voiceover_text
+            scene.tts = TTSMeta()
+            scene.caption_chunks = make_caption_chunks(text, estimate_duration(text))
+            scene.duration_seconds = estimate_duration(text)
+            if scene.clip:
+                scene.clip.status = "trim_stale"
+        if _delete_project_file(project, project.voiceover_track.audio_path):
+            deleted += 1
+        project.voiceover_track = VoiceoverTrack()
+        project.timeline = None
+        self.store.put(project)
+        return {
+            "success": True,
+            "deleted_files": deleted,
+            "project": project.model_dump(),
+            "scenes": [scene.model_dump() for scene in project.scenes],
+        }
+
+    def build_combined_voiceover(self, project_id: str) -> dict:
+        project = self.store.get(project_id)
+        if project.voiceover_track.audio_path and Path(project.voiceover_track.audio_path).exists():
+            return {"success": True, "voiceover_track": project.voiceover_track.model_dump()}
+        scenes = _renderable_scenes(project)
+        if not scenes:
+            raise VideoDesignError(SCENE_NOT_READY, "Project has no renderable scenes.")
+
+        audio_paths: list[Path] = []
+        offsets: list[SceneAudioOffset] = []
+        current = 0.0
+        for scene in scenes:
+            if not scene.tts.audio_path:
+                raise VideoDesignError(AUDIO_NOT_FOUND, f"Scene {scene.scene_id} has no generated TTS audio.")
+            audio_path = Path(scene.tts.audio_path)
+            if not audio_path.exists():
+                raise VideoDesignError(AUDIO_NOT_FOUND, f"Scene audio file does not exist: {scene.scene_id}.")
+            duration = measure_audio_duration(audio_path) or scene.tts.duration_seconds or scene.duration_seconds
+            if duration <= 0:
+                raise VideoDesignError(AUDIO_NOT_FOUND, f"Could not measure scene audio duration: {scene.scene_id}.")
+            scene.duration_seconds = duration
+            scene.tts.duration_seconds = duration
+            scene.caption_chunks = make_caption_chunks(scene.caption_text or scene.tts_text or scene.voiceover_text, duration)
+            start = current
+            current = round(current + duration, 3)
+            offsets.append(
+                SceneAudioOffset(
+                    scene_id=scene.scene_id,
+                    start_seconds=round(start, 3),
+                    end_seconds=current,
+                )
+            )
+            audio_paths.append(audio_path)
+
+        output_dir = settings.storage_dir / project.project_id / "audio"
+        try:
+            combined_path, combined_duration = concatenate_audio_files(audio_paths, output_dir)
+        except ValueError as exc:
+            raise VideoDesignError(AUDIO_COMBINE_FAILED, f"Could not combine scene audio: {exc}", retryable=True) from exc
+
+        if combined_duration <= 0:
+            combined_duration = current
+        project.voiceover_track = VoiceoverTrack(
+            audio_url=f"/api/videodesign/projects/{project.project_id}/audio/combined",
+            audio_path=str(combined_path),
+            duration_seconds=round(combined_duration, 3),
+            scene_offsets=offsets,
+        )
+        if project.timeline:
+            project.timeline.duration_seconds = round(combined_duration, 3)
+        self.store.put(project)
+        return {"success": True, "voiceover_track": project.voiceover_track.model_dump()}
+
+    def combined_voiceover_path(self, project_id: str) -> Path:
+        project = self.store.get(project_id)
+        if not project.voiceover_track.audio_path:
+            raise VideoDesignError(AUDIO_NOT_FOUND, "Combined voiceover has not been created.")
+        path = Path(project.voiceover_track.audio_path)
+        if not path.exists():
+            raise VideoDesignError(AUDIO_NOT_FOUND, "Combined voiceover file does not exist.", retryable=True)
+        return path
 
     async def generate_scene_keywords(self, project_id: str, request: KeywordGenerateRequest) -> dict:
         project = self.store.get(project_id)
@@ -552,7 +696,9 @@ class VideoDesignService:
         skipped = []
         for scene in scenes:
             if scene.material_asset_id and not request.force:
-                downloaded.append(_asset(project, scene.material_asset_id).model_dump())
+                asset = _asset(project, scene.material_asset_id)
+                await _ensure_preview_proxy(asset, project.aspect_ratio)
+                downloaded.append(asset.model_dump())
                 continue
             candidate = _approved_candidate_for_scene(project, scene)
             if not candidate:
@@ -581,6 +727,7 @@ class VideoDesignService:
                 local_path=str(output_path),
                 duration=candidate.duration,
             )
+            await _ensure_preview_proxy(asset, project.aspect_ratio)
             project.material_assets.append(asset)
             scene.material_asset_id = asset.asset_id
             scene.clip = None
@@ -719,29 +866,39 @@ class VideoDesignService:
             "retryable": True,
         }
 
-    def create_studio_timeline(self, project_id: str) -> dict:
+    async def create_studio_timeline(self, project_id: str) -> dict:
         project = self.store.get(project_id)
         items: list[TimelineItem] = []
         current = 0.0
-        renderable_scenes = [scene for scene in project.scenes if scene.approval_state != "placeholder_allowed"]
+        renderable_scenes = _renderable_scenes(project)
+        voiceover_offsets = {offset.scene_id: offset for offset in project.voiceover_track.scene_offsets}
         for index, scene in enumerate(renderable_scenes):
             if scene.approval_state == "placeholder_allowed":
                 continue
             if not scene.material_asset_id:
                 raise VideoDesignError(SCENE_NOT_READY, f"Scene {scene.scene_id} must be downloaded before studio.")
             asset = _asset(project, scene.material_asset_id)
-            duration = _scene_duration(scene)
+            await _ensure_preview_proxy(asset, project.aspect_ratio)
+            offset = voiceover_offsets.get(scene.scene_id)
+            if offset:
+                start = round(offset.start_seconds, 2)
+                end = round(max(start + 0.25, offset.end_seconds), 2)
+                duration = round(end - start, 2)
+            else:
+                start = current
+                duration = _scene_duration(scene)
+                end = round(current + duration, 2)
             if not scene.clip or scene.clip.material_asset_id != asset.asset_id:
                 scene.clip = _make_scene_clip(scene, asset, duration)
-            end = round(current + duration, 2)
-            items.extend(_timeline_items_for_scene(project.project_id, scene, asset, current, end, project.design_preset))
+            items.extend(_timeline_items_for_scene(project.project_id, scene, asset, start, end, project.design_preset))
             if index < len(renderable_scenes) - 1:
                 items.append(_transition_item_for_scene(scene, end, project.design_preset))
-            current = end
+            current = max(current, end)
+        timeline_duration = project.voiceover_track.duration_seconds or current
         timeline = TimelineDraft(
             timeline_id=f"tln_{uuid.uuid4().hex}",
             project_id=project.project_id,
-            duration_seconds=round(current, 2),
+            duration_seconds=round(timeline_duration, 2),
             aspect_ratio=project.aspect_ratio,
             scenes=[scene.scene_id for scene in project.scenes],
             layers=["media_base", "overlay_default", "caption_default", "text_overlay", "icon", "voiceover_audio", "background_audio", "transition_out"],
@@ -755,10 +912,21 @@ class VideoDesignService:
         project = self.store.get(project_id)
         return {"success": True, "timeline": project.timeline.model_dump() if project.timeline else None}
 
+    def clear_timeline(self, project_id: str) -> dict:
+        project = self.store.get(project_id)
+        project.timeline = None
+        self.store.put(project)
+        return {"success": True, "project_id": project.project_id, "timeline": None}
+
     def material_file_path(self, project_id: str, asset_id: str) -> str:
         project = self.store.get(project_id)
         asset = _asset(project, asset_id)
         return asset.local_path
+
+    def material_proxy_path(self, project_id: str, asset_id: str) -> str:
+        project = self.store.get(project_id)
+        asset = _asset(project, asset_id)
+        return asset.proxy_path or asset.local_path
 
     def create_timeline_item(self, project_id: str, request: TimelineItemCreateRequest) -> dict:
         project = self.store.get(project_id)
@@ -876,6 +1044,54 @@ def _selected_scenes(project: VideoDesignProject, scene_ids: list[str] | None) -
     if len(selected) != len(scene_ids):
         raise VideoDesignError(SCENE_NOT_FOUND, "One or more scenes do not exist.")
     return selected
+
+
+def _renderable_scenes(project: VideoDesignProject) -> list[ScenePlan]:
+    return [scene for scene in project.scenes if scene.approval_state != "placeholder_allowed"]
+
+
+def _assign_global_tts_offsets(scenes: list[ScenePlan], total_duration: float) -> list[SceneAudioOffset]:
+    if not scenes:
+        return []
+    safe_total = round(max(0.05, total_duration), 3)
+    weights = [max(0.05, estimate_duration(scene.tts_text or scene.voiceover_text)) for scene in scenes]
+    total_weight = sum(weights) or len(scenes)
+    offsets: list[SceneAudioOffset] = []
+    current = 0.0
+    for index, scene in enumerate(scenes):
+        if index == len(scenes) - 1:
+            end = safe_total
+        else:
+            duration = safe_total * (weights[index] / total_weight)
+            end = min(safe_total, round(current + max(0.05, duration), 3))
+        offsets.append(
+            SceneAudioOffset(
+                scene_id=scene.scene_id,
+                start_seconds=round(current, 3),
+                end_seconds=round(max(end, current + 0.05), 3),
+            )
+        )
+        current = offsets[-1].end_seconds
+    offsets[-1].end_seconds = safe_total
+    return offsets
+
+
+def _delete_project_file(project: VideoDesignProject, file_path: str) -> bool:
+    if not file_path:
+        return False
+    try:
+        path = Path(file_path).resolve()
+        project_root = (settings.storage_dir / project.project_id).resolve()
+        path.relative_to(project_root)
+    except (OSError, ValueError):
+        return False
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        path.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def _scene(project: VideoDesignProject, scene_id: str) -> ScenePlan:
@@ -1084,6 +1300,78 @@ def source_label(source: str) -> str:
     }.get(source, source)
 
 
+async def _create_preview_proxy(asset: MaterialAsset, aspect_ratio: str) -> Path | None:
+    ffmpeg = shutil.which("ffmpeg")
+    input_path = Path(asset.local_path)
+    if not ffmpeg or not input_path.exists():
+        return None
+    width, height = _proxy_resolution(aspect_ratio)
+    output_dir = settings.storage_dir / asset.project_id / "proxies"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{asset.asset_id}.mp4"
+    temp_path = output_path.with_suffix(".tmp.mp4")
+    if temp_path.exists():
+        temp_path.unlink()
+    vf = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps=30"
+    process = await asyncio.create_subprocess_exec(
+        ffmpeg,
+        "-y",
+        "-i",
+        str(input_path),
+        "-an",
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "24",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-g",
+        "60",
+        str(temp_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        await asyncio.wait_for(process.communicate(), timeout=180)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        if temp_path.exists():
+            temp_path.unlink()
+        return None
+    if process.returncode != 0 or not temp_path.exists():
+        if temp_path.exists():
+            temp_path.unlink()
+        return None
+    if output_path.exists():
+        output_path.unlink()
+    temp_path.replace(output_path)
+    return output_path
+
+
+async def _ensure_preview_proxy(asset: MaterialAsset, aspect_ratio: str) -> Path | None:
+    if asset.proxy_path and Path(asset.proxy_path).exists():
+        return Path(asset.proxy_path)
+    proxy_path = await _create_preview_proxy(asset, aspect_ratio)
+    if proxy_path:
+        asset.proxy_path = str(proxy_path)
+    return proxy_path
+
+
+def _proxy_resolution(aspect_ratio: str) -> tuple[int, int]:
+    if aspect_ratio == "16:9":
+        return 1920, 1080
+    if aspect_ratio == "1:1":
+        return 1080, 1080
+    return 1080, 1920
+
+
 def _scene_duration(scene: ScenePlan) -> float:
     return round(max(0.25, float(scene.duration_seconds or estimate_duration(scene.voiceover_text))), 2)
 
@@ -1143,10 +1431,14 @@ def _make_scene_clip(
 
 def _media_source_ref(project_id: str, scene: ScenePlan, asset: MaterialAsset, timeline_duration: float) -> dict:
     clip = scene.clip or _make_scene_clip(scene, asset, timeline_duration)
+    raw_media_url = f"/api/videodesign/projects/{project_id}/materials/{asset.asset_id}/file"
+    proxy_media_url = f"/api/videodesign/projects/{project_id}/materials/{asset.asset_id}/proxy" if asset.proxy_path else raw_media_url
     return {
         "source": "material_asset",
         "asset_id": asset.asset_id,
-        "media_url": f"/api/videodesign/projects/{project_id}/materials/{asset.asset_id}/file",
+        "media_url": proxy_media_url,
+        "raw_media_url": raw_media_url,
+        "proxy_media_url": proxy_media_url if asset.proxy_path else "",
         "asset_duration_seconds": max(0.0, float(asset.duration or 0)),
         "timeline_duration_seconds": round(timeline_duration, 2),
         "trim_source": clip.trim_source,
@@ -1214,6 +1506,8 @@ def _default_layer_for_item_type(item_type: str) -> str:
 def _default_transform_for_item_type(item_type: str) -> dict:
     if item_type == "icon":
         return {"x": 58, "y": 42, "scale": 1, "rotation": 0}
+    if item_type == "caption":
+        return {"x": 50, "y": 78, "scale": 1, "rotation": 0}
     if item_type == "text":
         return {"x": 50, "y": 18, "scale": 1, "rotation": 0}
     return {}
@@ -1287,6 +1581,7 @@ def _timeline_items_for_scene(project_id: str, scene: ScenePlan, asset: Material
             start_seconds=start,
             end_seconds=end,
             source_ref={"caption_chunks": [chunk.model_dump() for chunk in scene.caption_chunks]},
+            transform=_default_transform_for_item_type("caption"),
             style={"caption_style_id": "word_reveal_bold"},
         ),
         TimelineItem(

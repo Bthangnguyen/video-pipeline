@@ -2,6 +2,7 @@ import uuid
 import wave
 from pathlib import Path
 
+from app.videodesign.audio import measure_audio_duration
 from app.videodesign.config import settings
 from app.videodesign.errors import TTS_GENERATION_FAILED, TTS_PROVIDER_UNAVAILABLE, VideoDesignError
 from app.videodesign.planner import estimate_duration, make_caption_chunks
@@ -35,13 +36,13 @@ class TTSClient:
                 retryable=False,
             ) from exc
 
-        duration = estimate_duration(text)
         audio_path = storage_dir / f"{scene_id}_{uuid.uuid4().hex}.mp3"
         try:
             communicate = edge_tts.Communicate(text, voice_id or settings.tts_voice_id)
             await communicate.save(str(audio_path))
         except Exception as exc:
             raise VideoDesignError(TTS_GENERATION_FAILED, f"TTS generation failed: {exc}", retryable=True) from exc
+        duration = measure_audio_duration(audio_path) or estimate_duration(text)
         return TTSResult(audio_path=audio_path, duration_seconds=duration, caption_chunks=make_caption_chunks(text, duration))
 
     def _timing_only(self, text: str, storage_dir: Path, scene_id: str) -> TTSResult:
@@ -54,4 +55,5 @@ class TTSClient:
             handle.setsampwidth(2)
             handle.setframerate(sample_rate)
             handle.writeframes(b"\x00\x00" * frame_count)
+        duration = measure_audio_duration(audio_path) or duration
         return TTSResult(audio_path=audio_path, duration_seconds=duration, caption_chunks=make_caption_chunks(text, duration))

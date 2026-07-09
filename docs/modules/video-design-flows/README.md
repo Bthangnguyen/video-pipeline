@@ -14,6 +14,8 @@ Project Start
 -> Studio Timeline
 -> Trim Selection & Render Assembly
 -> Studio Creative Controls
+-> Studio Continuity & Render
+-> Studio Transition, Caption Drag & Playhead
 ```
 
 Each flow should feel like a dedicated screen, not a section in one long form.
@@ -27,6 +29,8 @@ Each flow should feel like a dedicated screen, not a section in one long form.
 - [05 Studio Timeline Flow](05-studio-timeline-flow.md)
 - [06 Trim Selection And Render Assembly Flow](06-trim-render-flow.md)
 - [07 Studio Creative Controls Flow](07-studio-creative-controls-flow.md)
+- [08 Studio Continuity And Render Flow](08-studio-continuity-render-flow.md)
+- [09 Studio Transition, Caption Drag, And Playhead Flow](09-studio-transition-caption-playhead-flow.md)
 
 ## Shared Shell
 

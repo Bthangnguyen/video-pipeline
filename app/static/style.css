@@ -1684,7 +1684,7 @@ textarea {
   color: #ffffff;
   text-align: center;
   text-shadow: 0 2px 14px rgba(0, 0, 0, 0.78);
-  pointer-events: none;
+  touch-action: none;
 }
 
 .vd-canvas-caption {
@@ -1692,6 +1692,8 @@ textarea {
   font-size: 22px;
   font-weight: 900;
   line-height: 1.12;
+  cursor: grab;
+  pointer-events: auto;
 }
 
 .vd-canvas-text {
@@ -2067,6 +2069,7 @@ textarea {
 .vd-studio-pro .vd-canvas-caption .is-active {
   display: inline-block;
   transform: translateY(-1px);
+  text-shadow: var(--caption-active-glow, 0 0 14px rgba(60, 230, 172, 0.75));
 }
 
 .vd-canvas-icons {
@@ -2202,7 +2205,30 @@ textarea {
   width: 1px;
   background: #3ce6ac;
   box-shadow: 0 0 0 1px rgba(60, 230, 172, 0.18);
-  pointer-events: none;
+  cursor: ew-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.vd-playhead::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -8px;
+  width: 17px;
+  height: 100%;
+}
+
+.vd-playhead::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -5px;
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  background: #3ce6ac;
+  box-shadow: 0 0 0 3px rgba(60, 230, 172, 0.2);
 }
 
 .vd-studio-pro .vd-timeline-tracks {

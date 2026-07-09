@@ -29,11 +29,18 @@ class CaptionChunk(BaseModel):
     end: float
 
 
+class SceneAudioOffset(BaseModel):
+    scene_id: str
+    start_seconds: float
+    end_seconds: float
+
+
 class TTSMeta(BaseModel):
     provider: str = ""
     voice_id: str = ""
     audio_url: str = ""
     audio_path: str = ""
+    duration_seconds: float = 0
     sync_state: str = "pending"
 
 
@@ -136,6 +143,7 @@ class MaterialAsset(BaseModel):
     douyin_result_id: str = ""
     douyin_aweme_id: str = ""
     local_path: str
+    proxy_path: str = ""
     media_type: str = "video/mp4"
     duration: float = 0
     download_state: str = "downloaded"
@@ -171,6 +179,13 @@ class ProjectProgress(BaseModel):
     detail: dict[str, Any] = Field(default_factory=dict)
 
 
+class VoiceoverTrack(BaseModel):
+    audio_url: str = ""
+    audio_path: str = ""
+    duration_seconds: float = 0
+    scene_offsets: list[SceneAudioOffset] = Field(default_factory=list)
+
+
 class VideoDesignProject(BaseModel):
     project_id: str
     status: str = "draft"
@@ -190,6 +205,7 @@ class VideoDesignProject(BaseModel):
     candidates: list[MediaCandidate] = Field(default_factory=list)
     material_assets: list[MaterialAsset] = Field(default_factory=list)
     timeline: TimelineDraft | None = None
+    voiceover_track: VoiceoverTrack = Field(default_factory=VoiceoverTrack)
     progress: ProjectProgress = Field(default_factory=ProjectProgress)
     created_at: str
 

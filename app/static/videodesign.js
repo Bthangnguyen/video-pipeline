@@ -27,6 +27,8 @@ const TIMELINE_LABEL_WIDTH_COMPACT = 96;
 const TIMELINE_MIN_CLIP_SECONDS = 0.25;
 const TIMELINE_MIN_ZOOM = 18;
 const TIMELINE_MAX_ZOOM = 140;
+const TRANSITION_PRELOAD_MARGIN = 0.55;
+const SAFE_REALTIME_TRANSITIONS = new Set(["none", "fade", "dissolve", "slide_left", "slide_right", "slide_up", "zoom_in", "zoom_out"]);
 const FONT_OPTIONS = ["Inter", "Montserrat", "Poppins", "Anton", "Bebas Neue", "Arial", "Georgia"];
 const CAPTION_MODES = ["one_word", "full_line", "word_reveal", "active_word_highlight", "typewriter", "two_line_karaoke"];
 const OVERLAY_OPTIONS = ["none", "caption_shadow", "soft_vignette", "focus_frame", "dim_background", "caption_shade", "subtle_grain"];
@@ -116,12 +118,14 @@ function bindEvents() {
   document.getElementById("download-approved").addEventListener("click", downloadApproved);
 
   document.getElementById("create-timeline").addEventListener("click", createTimeline);
+  document.getElementById("clear-timeline").addEventListener("click", clearTimeline);
   document.getElementById("studio-play").addEventListener("click", toggleStudioPlayback);
   document.getElementById("studio-video").addEventListener("timeupdate", onStudioVideoTimeUpdate);
   document.getElementById("studio-video").addEventListener("loadedmetadata", updateStudioClock);
   document.getElementById("studio-video").addEventListener("ended", onStudioVideoEnded);
   document.getElementById("studio-video").addEventListener("play", updateStudioPlaybackButton);
   document.getElementById("studio-video").addEventListener("pause", updateStudioPlaybackButton);
+  document.getElementById("studio-audio").addEventListener("timeupdate", onStudioAudioTimeUpdate);
   document.getElementById("studio-audio").addEventListener("play", updateStudioPlaybackButton);
   document.getElementById("studio-audio").addEventListener("pause", updateStudioPlaybackButton);
   document.getElementById("timeline-fit").addEventListener("click", fitTimeline);
@@ -129,6 +133,7 @@ function bindEvents() {
   document.getElementById("timeline-zoom-in").addEventListener("click", () => zoomTimeline(1));
   document.getElementById("timeline-ruler").addEventListener("pointerdown", seekTimelineFromPointer);
   document.getElementById("timeline-tracks").addEventListener("pointerdown", seekTimelineFromPointer);
+  document.getElementById("timeline-playhead").addEventListener("pointerdown", startPlayheadDrag);
   document.querySelectorAll("[data-studio-tool]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedTool = button.dataset.studioTool;
@@ -137,6 +142,7 @@ function bindEvents() {
   });
 
   document.getElementById("studio-text").addEventListener("pointerdown", startCanvasTextDrag);
+  document.getElementById("studio-caption").addEventListener("pointerdown", startCanvasCaptionDrag);
   document.addEventListener("pointermove", onPointerMove);
   document.addEventListener("pointerup", endPointerDrag);
 }
@@ -283,17 +289,49 @@ async function savePreset() {
 
 async function generateTts() {
   ensureProject();
-  await run("Generating TTS audio and timing", async () => {
+  await run("Generating project voiceover and timing", async () => {
     await savePreset();
-    await api(`/api/videodesign/projects/${state.projectId}/tts/generate`, {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/tts/generate`, {
       method: "POST",
       body: {
         provider: state.preset.voiceover.provider,
         voice_id: state.preset.voiceover.voice_id,
       },
     });
+    state.project = data.project || state.project;
+    if (data.voiceover_track && state.project) {
+      state.project.voiceover_track = data.voiceover_track;
+    }
+    state.timeline = null;
     await loadReview();
-    setStatus("TTS generated. Review timing, then continue to Materials.", "idle");
+    setStatus("Project voiceover generated as one continuous track.", "idle");
+  });
+}
+
+async function buildCombinedVoiceover(options = {}) {
+  ensureProject();
+  const data = await api(`/api/videodesign/projects/${state.projectId}/audio/combined`, { method: "POST" });
+  state.project = {
+    ...(state.project || {}),
+    voiceover_track: data.voiceover_track,
+  };
+  if (options.refresh !== false) {
+    await loadReview();
+    if (state.timeline) await loadTimeline();
+  }
+  return data.voiceover_track;
+}
+
+async function clearGeneratedTts() {
+  ensureProject();
+  if (!window.confirm("Clear all generated TTS audio for this project? The Studio timeline will need to be created again.")) return;
+  await run("Clearing generated TTS", async () => {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/tts`, { method: "DELETE" });
+    state.project = data.project;
+    state.timeline = null;
+    state.selectedItemId = "";
+    await loadReview();
+    setStatus(`Cleared generated TTS audio (${data.deleted_files || 0} file(s)).`, "idle");
   });
 }
 
@@ -566,6 +604,9 @@ async function downloadApproved() {
 async function createTimeline() {
   ensureProject();
   await run("Creating Studio timeline", async () => {
+    if (!combinedVoiceoverTrack() && state.rows.length && state.rows.every((row) => row.scene.tts?.sync_state === "synced")) {
+      await buildCombinedVoiceover({ refresh: false });
+    }
     const data = await api(`/api/videodesign/projects/${state.projectId}/studio`, { method: "POST" });
     state.timeline = data.timeline;
     const firstMedia = state.timeline.items.find((item) => item.type === "media");
@@ -575,6 +616,22 @@ async function createTimeline() {
       state.selectedTool = "media";
     }
     renderStudio();
+  });
+}
+
+async function clearTimeline() {
+  ensureProject();
+  if (!state.timeline && !window.confirm("No timeline is loaded. Clear the saved timeline state anyway?")) return;
+  if (state.timeline && !window.confirm("Clear the current Studio timeline? Materials, TTS, and downloaded videos will stay available.")) return;
+  await run("Clearing Studio timeline", async () => {
+    state.timelinePlaying = false;
+    pauseStudioMedia();
+    await api(`/api/videodesign/projects/${state.projectId}/timeline`, { method: "DELETE" });
+    state.timeline = null;
+    state.selectedItemId = "";
+    state.timelinePlayheadSeconds = 0;
+    renderStudio();
+    setStatus("Timeline cleared. You can create it again from the current materials.", "idle");
   });
 }
 
@@ -709,12 +766,20 @@ function renderTtsStatus() {
   const row = selectedRow();
   const synced = rows.filter((row) => row.scene.tts?.sync_state === "synced").length;
   const audioUrl = row?.scene.tts?.audio_url || "";
+  const voiceoverTrack = combinedVoiceoverTrack();
+  const sceneUsesProjectVoice = !audioUrl && row?.scene.tts?.sync_state === "synced" && voiceoverTrack?.audio_url;
   panel.innerHTML = `
     <h3>TTS status</h3>
     <p class="vd-muted">${synced}/${rows.length} scenes have audio timing.</p>
     <div class="vd-audio-preview">
+      <strong>Project voiceover</strong>
+      ${voiceoverTrack?.audio_url ? `<audio controls preload="none" src="${voiceoverTrack.audio_url}"></audio><p class="vd-muted">${formatDuration(voiceoverTrack.duration_seconds || 0)} continuous timeline audio.</p>` : `<p class="vd-muted">Generate TTS to create one continuous Studio voiceover.</p>`}
+      <button id="build-combined-voiceover" type="button" ${rows.length && synced === rows.length ? "" : "disabled"}>${voiceoverTrack?.audio_url ? "Refresh voiceover track" : "Build voiceover track"}</button>
+      <button id="clear-generated-tts" class="vd-danger" type="button" ${synced || voiceoverTrack?.audio_url ? "" : "disabled"}>Clear generated TTS</button>
+    </div>
+    <div class="vd-audio-preview">
       <strong>${row ? `Scene ${row.scene.order} voice` : "Voice preview"}</strong>
-      ${audioUrl ? `<audio controls preload="none" src="${audioUrl}"></audio>` : `<p class="vd-muted">Generate TTS to preview the selected scene voice.</p>`}
+      ${audioUrl ? `<audio controls preload="none" src="${audioUrl}"></audio>` : sceneUsesProjectVoice ? `<p class="vd-muted">This scene is timed inside the project voiceover track.</p>` : `<p class="vd-muted">Generate TTS to preview the selected scene voice.</p>`}
     </div>
     <div class="vd-tts-list">
       ${rows.length ? rows.map((row) => `
@@ -733,6 +798,13 @@ function renderTtsStatus() {
       renderAll();
     });
   });
+  panel.querySelector("#build-combined-voiceover")?.addEventListener("click", () => {
+    run("Building combined voiceover", async () => {
+      await buildCombinedVoiceover();
+      setStatus("Combined voiceover is ready for Studio playback.", "idle");
+    });
+  });
+  panel.querySelector("#clear-generated-tts")?.addEventListener("click", clearGeneratedTts);
   panel.querySelector("#tts-continue-materials")?.addEventListener("click", () => navigate("materials"));
 }
 
@@ -1103,11 +1175,22 @@ function renderCaptionStylePanel(panel, row) {
       <label><input id="caption-bold" type="checkbox" ${Number(style.font_weight || 800) >= 700 ? "checked" : ""}> Bold</label>
       <label><input id="caption-italic" type="checkbox" ${style.italic ? "checked" : ""}> Italic</label>
       <label><input id="caption-shadow" type="checkbox" ${style.shadow !== false ? "checked" : ""}> Shadow</label>
+      <label><input id="caption-glow" type="checkbox" ${style.glow !== false ? "checked" : ""}> Word glow</label>
     </div>
-    <button id="save-caption-style" class="vd-primary" type="button">Save captions</button>
+    <div class="vd-control-grid">
+      <label>Glow color <input id="caption-glow-color" type="color" value="${escapeHtml(style.glow_color || style.active_word_color || "#3ce6ac")}"></label>
+      <label>Glow blur <input id="caption-glow-blur" type="range" min="0" max="26" step="1" value="${Number(style.glow_blur ?? 14)}"></label>
+      <label>Glow power <input id="caption-glow-intensity" type="range" min="0" max="1" step="0.05" value="${Number(style.glow_intensity ?? 0.75)}"></label>
+    </div>
+    <p class="vd-muted">Drag the caption directly on the preview canvas.</p>
+    <div class="vd-button-row">
+      <button id="save-caption-style" class="vd-primary" type="button">Save scene captions</button>
+      <button id="apply-caption-all" type="button">Apply all scenes</button>
+    </div>
   `;
   panel.querySelectorAll("input, select").forEach((input) => input.addEventListener("input", () => applyCaptionDraftToStage(panel, item)));
   panel.querySelector("#save-caption-style")?.addEventListener("click", () => saveCaptionStyle(panel, item));
+  panel.querySelector("#apply-caption-all")?.addEventListener("click", () => applyCaptionStyleAll(panel, item));
   applyCaptionDraftToStage(panel, item);
 }
 
@@ -1247,6 +1330,10 @@ function captionStyle(item) {
     active_word_color: "#3ce6ac",
     stroke_color: "#111111",
     shadow: true,
+    glow: true,
+    glow_color: "#3ce6ac",
+    glow_blur: 14,
+    glow_intensity: 0.75,
     ...(item?.style || {}),
   };
 }
@@ -1273,6 +1360,10 @@ function collectCaptionStyle(panel) {
     active_word_color: inputValue("caption-active-color", "#3ce6ac"),
     stroke_color: inputValue("caption-stroke-color", "#111111"),
     shadow: inputChecked("caption-shadow", true),
+    glow: inputChecked("caption-glow", true),
+    glow_color: inputValue("caption-glow-color", inputValue("caption-active-color", "#3ce6ac")),
+    glow_blur: Number(inputValue("caption-glow-blur", 14)),
+    glow_intensity: Number(inputValue("caption-glow-intensity", 0.75)),
   };
 }
 
@@ -1294,7 +1385,21 @@ function applyCaptionDraftToStage(panel, item) {
 async function saveCaptionStyle(panel, item) {
   if (!item || item.type !== "caption") return;
   applyCaptionDraftToStage(panel, item);
-  await patchTimelineItem(item.item_id, { style: item.style });
+  await patchTimelineItem(item.item_id, { style: item.style, transform: item.transform });
+}
+
+async function applyCaptionStyleAll(panel, item) {
+  if (!item || item.type !== "caption") return;
+  applyCaptionDraftToStage(panel, item);
+  const style = { ...(item.style || {}) };
+  const transform = { ...(item.transform || {}) };
+  const captionItems = timelineItems().filter((entry) => entry.type === "caption");
+  for (const captionItem of captionItems) {
+    captionItem.style = { ...(captionItem.style || {}), ...style };
+    captionItem.transform = { ...(captionItem.transform || {}), ...transform };
+    await patchTimelineItem(captionItem.item_id, { style: captionItem.style, transform: captionItem.transform }, { render: false });
+  }
+  renderStudio();
 }
 
 function overlayIdForItem(item) {
@@ -1714,7 +1819,8 @@ function renderStudioStage() {
   if (nextVideo) nextVideo.muted = true;
   if (audio) audio.muted = false;
   const mediaChanged = setPlaybackElementSource(video, media?.source_ref?.media_url || "");
-  const audioChanged = setPlaybackElementSource(audio, audioItem?.source_ref?.audio_url || "");
+  const voiceoverTrack = combinedVoiceoverTrack();
+  const audioChanged = setPlaybackElementSource(audio, voiceoverTrack?.audio_url || audioItem?.source_ref?.audio_url || "");
   applyStudioMediaEffects(video, media);
   if (mediaChanged && media && !state.timelinePlaying) {
     const setInitialCutTime = () => {
@@ -1731,7 +1837,7 @@ function renderStudioStage() {
   if (audioChanged && audio && !state.timelinePlaying) {
     const resetAudio = () => {
       try {
-        audio.currentTime = 0;
+        audio.currentTime = voiceoverTrack ? Number(media?.start_seconds || 0) : 0;
       } catch {
         return;
       }
@@ -1741,11 +1847,12 @@ function renderStudioStage() {
   }
 
   sceneLabel.textContent = row ? `Scene ${row.scene.order}` : "No scene selected";
-  mediaState.textContent = studioMediaStateLabel(media, audioItem);
+  mediaState.textContent = studioMediaStateLabel(media, audioItem, voiceoverTrack);
   stage.dataset.overlay = overlayIdForItem(overlay);
   stage.style.setProperty("--scene-overlay-opacity", String(Number(overlay?.style?.opacity ?? 0.35)));
   stage.dataset.captionStyle = caption?.style?.caption_style_id || state.preset.captions.style_id || "bold_outline";
   captionEl.dataset.itemId = caption?.item_id || "";
+  applyCaptionTransformToElement(captionEl, caption);
   textEl.textContent = textForItem(text) || row?.scene.on_screen_text || "";
   textEl.dataset.itemId = text?.item_id || "";
   renderStudioText(text);
@@ -1798,6 +1905,7 @@ function updateCaptionPreview(globalTime = state.timelinePlayheadSeconds) {
   const chunks = item?.source_ref?.caption_chunks || row?.scene.caption_chunks || [];
   const style = captionStyle(item);
   applyCaptionStyleToElement(captionEl, style);
+  applyCaptionTransformToElement(captionEl, item);
   captionEl.innerHTML = captionHtmlForTime(chunks, row, item, globalTime, style);
 }
 
@@ -1808,6 +1916,24 @@ function applyCaptionStyleToElement(element, style) {
   element.style.fontStyle = style.italic ? "italic" : "normal";
   element.style.color = style.text_color || "#ffffff";
   element.style.textShadow = style.shadow === false ? "none" : `0 2px 10px ${style.stroke_color || "#111111"}`;
+  element.style.setProperty("--caption-active-glow", style.glow === false ? "none" : activeWordGlow(style));
+}
+
+function applyCaptionTransformToElement(element, item) {
+  if (!element) return;
+  const transform = item?.transform || { x: 50, y: 78, scale: 1, rotation: 0 };
+  element.style.left = `${Number(transform.x ?? 50)}%`;
+  element.style.top = `${Number(transform.y ?? 78)}%`;
+  element.style.bottom = "auto";
+  element.style.transform = `translate(-50%, -50%) scale(${Number(transform.scale || 1)}) rotate(${Number(transform.rotation || 0)}deg)`;
+}
+
+function activeWordGlow(style) {
+  const color = style.glow_color || style.active_word_color || "#3ce6ac";
+  const blur = Math.max(0, Number(style.glow_blur ?? 14));
+  const intensity = clamp(Number(style.glow_intensity ?? 0.75), 0, 1);
+  if (!blur || !intensity) return "none";
+  return `0 0 ${blur}px ${rgbaFromHex(color, intensity)}, 0 0 ${Math.round(blur * 0.45)}px ${color}`;
 }
 
 function captionHtmlForTime(chunks, row, item, globalTime, style) {
@@ -1834,7 +1960,7 @@ function captionHtmlForTime(chunks, row, item, globalTime, style) {
   }
   return words.map((word, index) => {
     const active = index === activeIndex;
-    return `<span ${active ? `class="is-active" style="color:${escapeHtml(style.active_word_color || "#3ce6ac")}"` : ""}>${escapeHtml(word)}</span>`;
+    return `<span ${active ? `class="is-active" style="color:${escapeHtml(style.active_word_color || "#3ce6ac")};text-shadow:var(--caption-active-glow, none);"` : ""}>${escapeHtml(word)}</span>`;
   }).join(" ");
 }
 
@@ -1864,9 +1990,10 @@ function renderStudioIcons() {
   });
 }
 
-function studioMediaStateLabel(media, audioItem) {
+function studioMediaStateLabel(media, audioItem, voiceoverTrack = combinedVoiceoverTrack()) {
   if (!media?.source_ref?.media_url) return "No media";
   const cutLabel = `Cut ${formatDuration(mediaTrimStart(media))}-${formatDuration(mediaTrimEnd(media))}`;
+  if (voiceoverTrack?.audio_url) return `${trimStatusLabel(media)} / ${cutLabel} + project voice`;
   return `${trimStatusLabel(media)} / ${cutLabel}${audioItem?.source_ref?.audio_url ? " + voice" : " / no voice"}`;
 }
 
@@ -2022,14 +2149,11 @@ function updateTimelineZoomButtons() {
 
 function seekTimelineFromPointer(event) {
   if (!state.timeline || event.button !== 0 || event.target.closest("[data-item-id]")) return;
+  if (event.target.closest("#timeline-playhead")) return;
   const fromRuler = event.currentTarget?.id === "timeline-ruler";
   if (!fromRuler && !event.target.closest(".vd-track-lane")) return;
-  const board = document.querySelector(".vd-timeline-board");
-  if (!board) return;
-  const metrics = timelineMetrics();
-  const rect = board.getBoundingClientRect();
-  const x = event.clientX - rect.left + board.scrollLeft - metrics.labelWidth;
-  seekTimeline(clamp(x / metrics.pxPerSecond, 0, metrics.duration), { autoplay: state.timelinePlaying });
+  const time = timeFromTimelinePointer(event);
+  if (time !== null) seekTimeline(time, { autoplay: state.timelinePlaying });
 }
 
 function seekTimeline(globalTime, options = {}) {
@@ -2065,17 +2189,27 @@ function syncStudioVideoToTimeline(globalTime, options = {}) {
   const localTime = mediaTrimStart(media) + clamp(globalTime - media.start_seconds, 0, Math.max(0, media.end_seconds - media.start_seconds));
   const targetVideoTime = clamp(localTime, mediaTrimStart(media), mediaTrimEnd(media));
   const setTime = () => {
-    try {
-      video.currentTime = targetVideoTime;
-    } catch {
-      return;
+    const drift = Math.abs(Number(video.currentTime || 0) - targetVideoTime);
+    const driftLimit = Number(options.videoDriftThreshold ?? 0.18);
+    const shouldSetTime = !options.tolerateDrift || drift > driftLimit || video.paused;
+    if (shouldSetTime) {
+      try {
+        video.currentTime = targetVideoTime;
+      } catch {
+        return;
+      }
     }
     updateStudioClock(globalTime);
-    syncStudioAudioToTimeline(globalTime, options);
-    if (options.autoplay) playStudioVideo();
+    if (!options.skipAudioSync) syncStudioAudioToTimeline(globalTime, options);
+    if (options.autoplay && video.paused) playStudioVideo();
   };
   if (video.readyState > 0) setTime();
   else video.addEventListener("loadedmetadata", setTime, { once: true });
+}
+
+function combinedVoiceoverTrack() {
+  const track = state.project?.voiceover_track;
+  return track?.audio_url ? track : null;
 }
 
 function currentAudioItem() {
@@ -2084,6 +2218,17 @@ function currentAudioItem() {
 
 function syncStudioAudioToTimeline(globalTime, options = {}) {
   const audio = document.getElementById("studio-audio");
+  const track = combinedVoiceoverTrack();
+  if (track) {
+    if (!audio || !audio.src) return;
+    if (globalTime < 0 || globalTime > Number(track.duration_seconds || state.timeline?.duration_seconds || 0) + 0.05) {
+      audio.pause();
+      return;
+    }
+    const targetTime = clamp(globalTime, 0, Math.max(0, Number(track.duration_seconds || globalTime || 0)));
+    syncAudioElementToTime(audio, targetTime, options);
+    return;
+  }
   const item = currentAudioItem();
   if (!audio || !item?.source_ref?.audio_url || !audio.src) return;
   if (globalTime < item.start_seconds || globalTime > item.end_seconds) {
@@ -2091,6 +2236,10 @@ function syncStudioAudioToTimeline(globalTime, options = {}) {
     return;
   }
   const targetTime = clamp(globalTime - item.start_seconds, 0, Math.max(0, item.end_seconds - item.start_seconds));
+  syncAudioElementToTime(audio, targetTime, options);
+}
+
+function syncAudioElementToTime(audio, targetTime, options = {}) {
   const drift = Math.abs(Number(audio.currentTime || 0) - targetTime);
   const shouldSetTime = !options.tolerateDrift || drift > 0.28;
   const setAudioTime = () => {
@@ -2159,6 +2308,12 @@ function globalTimeFromVideo(media = currentMediaItem(), video = document.getEle
   if (!media) return state.timelinePlayheadSeconds || 0;
   const localElapsed = Math.max(0, Number(video?.currentTime || 0) - mediaTrimStart(media));
   return (media.start_seconds || 0) + localElapsed;
+}
+
+function globalTimeFromAudio(track = combinedVoiceoverTrack(), audio = document.getElementById("studio-audio")) {
+  if (!track || !audio?.src) return state.timelinePlayheadSeconds || 0;
+  const duration = Math.max(0, Number(track.duration_seconds || state.timeline?.duration_seconds || 0));
+  return clamp(Number(audio.currentTime || 0), 0, duration || Number(audio.currentTime || 0));
 }
 
 function mediaTrimStart(item) {
@@ -2243,51 +2398,50 @@ function applyTransitionPreview(globalTime) {
   const duration = Math.max(0.05, item.end_seconds - item.start_seconds);
   const rawProgress = clamp((globalTime - item.start_seconds) / duration, 0, 1);
   const progress = easeInOutCubic(rawProgress);
-  const id = normalizedTransitionId(transitionIdForItem(item));
+  const requestedId = normalizedTransitionId(transitionIdForItem(item));
+  const id = SAFE_REALTIME_TRANSITIONS.has(requestedId) ? requestedId : "fade";
   const nextMedia = nextMediaForTransition(item);
   syncTransitionNextVideo(nextVideo, nextMedia);
+  const nextReady = Boolean(nextMedia?.source_ref?.media_url) && nextVideo.dataset.transitionReady === "true";
   let outOpacity = 1;
-  let inOpacity = progress;
+  let inOpacity = nextReady ? progress : 0;
   let outTransform = "";
   let inTransform = "";
   let flashOpacity = 0;
-  if (["fade", "dissolve"].includes(id)) {
+  if (!nextReady) {
+    outOpacity = 1;
+    inOpacity = 0;
+  } else if (id === "none") {
+    outOpacity = rawProgress < 0.96 ? 1 : 0;
+    inOpacity = nextReady && rawProgress >= 0.96 ? 1 : 0;
+  } else if (["fade", "dissolve"].includes(id)) {
     outOpacity = 1 - progress;
-    inOpacity = progress;
+    inOpacity = nextReady ? progress : 0;
   } else if (id === "slide_left") {
     outTransform = `translateX(${-progress * 100}%)`;
     inTransform = `translateX(${(1 - progress) * 100}%)`;
-    inOpacity = 1;
+    inOpacity = nextReady ? 1 : 0;
   } else if (id === "slide_right") {
     outTransform = `translateX(${progress * 100}%)`;
     inTransform = `translateX(${-(1 - progress) * 100}%)`;
-    inOpacity = 1;
+    inOpacity = nextReady ? 1 : 0;
   } else if (id === "slide_up") {
     outTransform = `translateY(${-progress * 100}%)`;
     inTransform = `translateY(${(1 - progress) * 100}%)`;
-    inOpacity = 1;
+    inOpacity = nextReady ? 1 : 0;
   } else if (id === "zoom_in") {
     outTransform = `scale(${1 + progress * 0.22})`;
     outOpacity = 1 - progress * 0.8;
     inTransform = `scale(${1.16 - progress * 0.16})`;
-    inOpacity = progress;
+    inOpacity = nextReady ? progress : 0;
   } else if (id === "zoom_out") {
     outTransform = `scale(${1 - progress * 0.18})`;
     outOpacity = 1 - progress * 0.8;
     inTransform = `scale(${0.88 + progress * 0.12})`;
-    inOpacity = progress;
-  } else if (id === "whip_pan") {
-    outTransform = `translateX(${-progress * 125}%) skewX(${-progress * 9}deg)`;
-    inTransform = `translateX(${(1 - progress) * 125}%) skewX(${(1 - progress) * 9}deg)`;
-    outOpacity = 1 - progress * 0.35;
-    inOpacity = 1;
-  } else if (id === "flash_cut") {
-    flashOpacity = Math.max(0, 1 - Math.abs(rawProgress - 0.5) * 2);
-    outOpacity = rawProgress < 0.5 ? 1 : 0;
-    inOpacity = rawProgress < 0.5 ? 0 : 1;
+    inOpacity = nextReady ? progress : 0;
   } else {
     outOpacity = 1 - progress;
-    inOpacity = progress;
+    inOpacity = nextReady ? progress : 0;
   }
   stage.dataset.transitionPreview = id || "none";
   stage.style.setProperty("--transition-flash-opacity", String(flashOpacity));
@@ -2305,7 +2459,7 @@ function transitionItemAtTime(globalTime) {
 
 function upcomingTransitionItem(globalTime) {
   return timelineItems()
-    .filter((item) => item.type === "transition" && item.start_seconds > globalTime && item.start_seconds - globalTime <= 1.2)
+    .filter((item) => item.type === "transition" && item.start_seconds > globalTime && item.start_seconds - globalTime <= TRANSITION_PRELOAD_MARGIN)
     .sort((a, b) => a.start_seconds - b.start_seconds)[0] || null;
 }
 
@@ -2330,8 +2484,14 @@ function easeInOutCubic(value) {
 }
 
 function syncTransitionNextVideo(nextVideo, nextMedia) {
-  if (!nextVideo || !nextMedia?.source_ref?.media_url) return;
+  if (!nextVideo) return;
+  if (!nextMedia?.source_ref?.media_url) {
+    nextVideo.dataset.transitionReady = "false";
+    return;
+  }
   const changed = setPlaybackElementSource(nextVideo, nextMedia.source_ref.media_url);
+  if (changed) nextVideo.dataset.transitionReady = "false";
+  else if (nextVideo.readyState >= 2) nextVideo.dataset.transitionReady = "true";
   applyStudioMediaEffects(nextVideo, nextMedia);
   const targetTime = mediaTrimStart(nextMedia);
   const setTime = () => {
@@ -2344,9 +2504,13 @@ function syncTransitionNextVideo(nextVideo, nextMedia) {
       }
     }
     nextVideo.pause();
+    nextVideo.dataset.transitionReady = nextVideo.readyState >= 2 ? "true" : "false";
   };
   if (nextVideo.readyState > 0) setTime();
   else nextVideo.addEventListener("loadedmetadata", setTime, { once: true });
+  nextVideo.addEventListener("canplay", () => {
+    nextVideo.dataset.transitionReady = "true";
+  }, { once: true });
 }
 
 function placeTimelineClip(clip, item) {
@@ -2382,6 +2546,22 @@ function startCanvasTextDrag(event) {
   const rect = document.getElementById("studio-stage").getBoundingClientRect();
   dragState = {
     kind: "canvas-text",
+    itemId: item.item_id,
+    rect,
+  };
+}
+
+function startCanvasCaptionDrag(event) {
+  const itemId = event.currentTarget.dataset.itemId;
+  const item = timelineItems().find((entry) => entry.item_id === itemId) || itemForScene("caption");
+  if (!item || item.type !== "caption") return;
+  event.preventDefault();
+  event.stopPropagation();
+  state.selectedItemId = item.item_id;
+  state.selectedTool = "captions";
+  const rect = document.getElementById("studio-stage").getBoundingClientRect();
+  dragState = {
+    kind: "canvas-caption",
     itemId: item.item_id,
     rect,
   };
@@ -2433,6 +2613,21 @@ function startTimelineDrag(event) {
   event.currentTarget.dataset.dragging = "true";
 }
 
+function startPlayheadDrag(event) {
+  if (!state.timeline || event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const wasPlaying = state.timelinePlaying;
+  state.timelinePlaying = false;
+  pauseStudioMedia();
+  dragState = {
+    kind: "playhead",
+    wasPlaying,
+    moved: false,
+  };
+  scrubTimelineToPointer(event);
+}
+
 function onPointerMove(event) {
   if (!dragState) return;
   if (dragState.kind === "canvas-text") {
@@ -2442,6 +2637,14 @@ function onPointerMove(event) {
     const y = clamp(((event.clientY - dragState.rect.top) / dragState.rect.height) * 100, 0, 100);
     item.transform = { ...(item.transform || {}), x: Math.round(x), y: Math.round(y) };
     renderStudioStage();
+  }
+  if (dragState.kind === "canvas-caption") {
+    const item = state.timeline.items.find((entry) => entry.item_id === dragState.itemId);
+    if (!item) return;
+    const x = clamp(((event.clientX - dragState.rect.left) / dragState.rect.width) * 100, 0, 100);
+    const y = clamp(((event.clientY - dragState.rect.top) / dragState.rect.height) * 100, 0, 100);
+    item.transform = { ...(item.transform || {}), x: Math.round(x), y: Math.round(y) };
+    updateCaptionPreview(state.timelinePlayheadSeconds);
   }
   if (dragState.kind === "canvas-icon") {
     const item = state.timeline.items.find((entry) => entry.item_id === dragState.itemId);
@@ -2472,10 +2675,21 @@ function onPointerMove(event) {
     renderStudioInspector();
     updateTimelinePlayhead(state.timelinePlayheadSeconds);
   }
+  if (dragState.kind === "playhead") {
+    dragState.moved = true;
+    scrubTimelineToPointer(event);
+  }
 }
 
 async function endPointerDrag() {
   if (!dragState) return;
+  if (dragState.kind === "playhead") {
+    const wasPlaying = dragState.wasPlaying;
+    dragState = null;
+    if (wasPlaying) playTimelineFrom(state.timelinePlayheadSeconds);
+    else updateStudioPlaybackButton();
+    return;
+  }
   const item = state.timeline?.items.find((entry) => entry.item_id === dragState.itemId);
   const shouldPatch = dragState.kind !== "timeline" || dragState.moved;
   const clipEl = dragState.clipEl;
@@ -2485,14 +2699,30 @@ async function endPointerDrag() {
   if (item && patch && shouldPatch) await patchTimelineItem(item.item_id, patch);
 }
 
-async function patchTimelineItem(itemId, patch) {
+function scrubTimelineToPointer(event) {
+  const time = timeFromTimelinePointer(event);
+  if (time === null) return;
+  seekTimeline(time, { autoplay: false, tolerateDrift: false });
+}
+
+function timeFromTimelinePointer(event) {
+  if (!state.timeline) return null;
+  const board = document.querySelector(".vd-timeline-board");
+  if (!board) return null;
+  const metrics = timelineMetrics();
+  const rect = board.getBoundingClientRect();
+  const x = event.clientX - rect.left + board.scrollLeft - metrics.labelWidth;
+  return clamp(x / metrics.pxPerSecond, 0, metrics.duration);
+}
+
+async function patchTimelineItem(itemId, patch, options = {}) {
   const data = await api(`/api/videodesign/projects/${state.projectId}/timeline/items/${itemId}`, {
     method: "PATCH",
     body: patch,
   });
   const index = state.timeline.items.findIndex((item) => item.item_id === itemId);
   if (index >= 0) state.timeline.items[index] = data.item;
-  renderStudio();
+  if (options.render !== false) renderStudio();
 }
 
 function setPresetChoice(button) {
@@ -2689,6 +2919,7 @@ function playTimelineFrom(globalTime) {
 
 function onStudioVideoTimeUpdate() {
   updateStudioClock();
+  if (combinedVoiceoverTrack()) return;
   if (!state.timelinePlaying) return;
   const media = currentMediaItem();
   if (!media) return;
@@ -2702,9 +2933,18 @@ function onStudioVideoTimeUpdate() {
 
 function onStudioVideoEnded() {
   if (!state.timelinePlaying) return;
+  if (combinedVoiceoverTrack()) {
+    syncTimelineToVoiceover(globalTimeFromAudio());
+    return;
+  }
   const media = currentMediaItem();
   if (!media) return;
   advanceTimelinePlayback(media.end_seconds + 0.001);
+}
+
+function onStudioAudioTimeUpdate() {
+  if (!state.timelinePlaying || !combinedVoiceoverTrack()) return;
+  syncTimelineToVoiceover(globalTimeFromAudio());
 }
 
 function advanceTimelinePlayback(globalTime) {
@@ -2720,12 +2960,46 @@ function advanceTimelinePlayback(globalTime) {
   seekTimeline(globalTime, { autoplay: true });
 }
 
+function syncTimelineToVoiceover(globalTime) {
+  if (!state.timeline || !combinedVoiceoverTrack()) return;
+  const duration = Math.max(1, state.timeline.duration_seconds || 1);
+  const time = clamp(Number(globalTime || 0), 0, duration);
+  if (time >= duration - 0.03) {
+    state.timelinePlaying = false;
+    pauseStudioMedia();
+    seekTimeline(duration);
+    updateStudioPlaybackButton();
+    return;
+  }
+  const media = mediaItemAtTime(time);
+  if (!media) {
+    updateStudioClock(time);
+    return;
+  }
+  const sceneChanged = state.selectedSceneId !== media.scene_id;
+  if (sceneChanged) {
+    state.selectedSceneId = media.scene_id;
+    if (!selectedItem() || selectedItem()?.scene_id !== media.scene_id) {
+      state.selectedItemId = media.item_id;
+    }
+    renderStudio();
+  }
+  syncStudioVideoToTimeline(time, {
+    autoplay: true,
+    tolerateDrift: true,
+    skipAudioSync: true,
+    videoDriftThreshold: sceneChanged ? 0 : 0.18,
+  });
+  updateStudioClock(time);
+}
+
 function startTimelineFrameTicker() {
   if (timelineFrameRequest) return;
   const tick = () => {
     timelineFrameRequest = null;
     if (!state.timelinePlaying) return;
-    updateStudioClock();
+    if (combinedVoiceoverTrack()) syncTimelineToVoiceover(globalTimeFromAudio());
+    else updateStudioClock();
     timelineFrameRequest = requestAnimationFrame(tick);
   };
   timelineFrameRequest = requestAnimationFrame(tick);
@@ -2740,7 +3014,7 @@ function stopTimelineFrameTicker() {
 function updateStudioClock(forcedGlobalTime = null) {
   const media = currentMediaItem();
   const hasForcedTime = typeof forcedGlobalTime === "number" && Number.isFinite(forcedGlobalTime);
-  const globalTime = hasForcedTime ? forcedGlobalTime : globalTimeFromVideo(media);
+  const globalTime = hasForcedTime ? forcedGlobalTime : (combinedVoiceoverTrack() ? globalTimeFromAudio() : globalTimeFromVideo(media));
   state.timelinePlayheadSeconds = clamp(globalTime, 0, Math.max(1, state.timeline?.duration_seconds || 1));
   updateCaptionPreview(state.timelinePlayheadSeconds);
   applyTransitionPreview(state.timelinePlayheadSeconds);
@@ -2920,6 +3194,19 @@ function formatDuration(seconds) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function rgbaFromHex(hex, alpha = 1) {
+  const value = String(hex || "").replace("#", "").trim();
+  const normalized = value.length === 3
+    ? value.split("").map((char) => char + char).join("")
+    : value.padEnd(6, "0").slice(0, 6);
+  const number = Number.parseInt(normalized, 16);
+  if (Number.isNaN(number)) return `rgba(60, 230, 172, ${clamp(alpha, 0, 1)})`;
+  const red = (number >> 16) & 255;
+  const green = (number >> 8) & 255;
+  const blue = number & 255;
+  return `rgba(${red}, ${green}, ${blue}, ${clamp(alpha, 0, 1)})`;
 }
 
 function inputValue(id, fallback = "") {
