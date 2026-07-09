@@ -12,7 +12,7 @@ from app.pinterestsearch.errors import PinterestSearchError
 from app.pinterestsearch.schemas import PublicPinterestResult, SearchResponse as PinterestSearchResponse
 from app.pinterestsearch.service import pinterest_service
 from app.videodesign.audio import measure_audio_duration
-from app.videodesign.errors import SCRIPT_GENERATION_FAILED, VideoDesignError
+from app.videodesign.errors import DOWNLOAD_FAILED, SCRIPT_GENERATION_FAILED, VideoDesignError
 from app.videodesign.planner import split_script
 from app.videodesign.schemas import MaterialAsset, MediaCandidate, SmoothPreview, SplitSettings
 import app.videodesign.service as videodesign_service_module
@@ -1136,6 +1136,147 @@ def test_videodesign_download_skips_unapproved_scene(monkeypatch):
     body = download_response.json()
     assert body["assets"] == []
     assert body["skipped"][0]["scene_id"] == scene_id
+
+
+def test_videodesign_download_persists_completed_scene_when_later_scene_fails(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_ids = [scene["scene_id"] for scene in plan_response.json()["scenes"][:2]]
+
+    project = videodesign_service.store.get(project_id)
+    for index, scene_id in enumerate(scene_ids):
+        candidate = MediaCandidate(
+            candidate_id=f"cand-partial-{index}",
+            source="douyinsearch",
+            scene_id=scene_id,
+            source_result_id=f"result-partial-{index}",
+            source_item_id=f"aweme-partial-{index}",
+            douyin_result_id=f"result-partial-{index}",
+            douyin_aweme_id=f"aweme-partial-{index}",
+            remote_download_url=f"https://example.com/{index}.mp4",
+            status="approved",
+        )
+        scene = next(item for item in project.scenes if item.scene_id == scene_id)
+        project.candidates.append(candidate)
+        scene.selected_candidate_id = candidate.candidate_id
+        scene.approval_state = "approved"
+    videodesign_service.store.put(project)
+
+    async def fake_download(candidate, output_path):
+        if candidate.candidate_id == "cand-partial-1":
+            raise RuntimeError("network dropped")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"video")
+
+    async def fake_proxy(asset, aspect_ratio):
+        return None
+
+    monkeypatch.setattr(videodesign_service, "_download_candidate", fake_download)
+    monkeypatch.setattr(videodesign_service_module, "_ensure_preview_proxy", fake_proxy)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/download",
+        json={"scene_ids": scene_ids},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == DOWNLOAD_FAILED
+    project = videodesign_service.store.get(project_id)
+    first_scene = next(item for item in project.scenes if item.scene_id == scene_ids[0])
+    second_scene = next(item for item in project.scenes if item.scene_id == scene_ids[1])
+    assert first_scene.material_asset_id
+    assert first_scene.approval_state == "downloaded"
+    assert second_scene.material_asset_id is None
+    assert second_scene.approval_state == "approved"
+    assert project.progress.stage == "materials_download_failed"
+
+
+def test_videodesign_download_recovers_existing_scene_file(monkeypatch, tmp_path):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_id = plan_response.json()["scenes"][0]["scene_id"]
+
+    project = videodesign_service.store.get(project_id)
+    scene = next(item for item in project.scenes if item.scene_id == scene_id)
+    candidate = MediaCandidate(
+        candidate_id="cand-recover-file",
+        source="douyinsearch",
+        scene_id=scene_id,
+        source_result_id="recover-result",
+        source_item_id="recover-aweme",
+        douyin_result_id="recover-result",
+        douyin_aweme_id="recover-aweme",
+        status="approved",
+    )
+    project.candidates.append(candidate)
+    scene.selected_candidate_id = candidate.candidate_id
+    scene.approval_state = "approved"
+    existing_path = videodesign_service_module.settings.storage_dir / project_id / "materials" / f"{scene_id}.mp4"
+    existing_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_path.write_bytes(b"already-downloaded")
+    videodesign_service.store.put(project)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("existing file should be recovered without re-downloading")
+
+    async def fake_proxy(asset, aspect_ratio):
+        return None
+
+    monkeypatch.setattr(videodesign_service, "_download_candidate", fail_if_called)
+    monkeypatch.setattr(videodesign_service_module, "_ensure_preview_proxy", fake_proxy)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/download",
+        json={"scene_ids": [scene_id]},
+    )
+
+    assert response.status_code == 200
+    asset = response.json()["assets"][0]
+    assert asset["candidate_id"] == "cand-recover-file"
+    project = videodesign_service.store.get(project_id)
+    scene = next(item for item in project.scenes if item.scene_id == scene_id)
+    assert scene.material_asset_id == asset["asset_id"]
+    assert scene.approval_state == "downloaded"
+
+
+def test_videodesign_download_recovers_existing_scene_file_without_candidate(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    scene_id = plan_response.json()["scenes"][0]["scene_id"]
+
+    project = videodesign_service.store.get(project_id)
+    scene = next(item for item in project.scenes if item.scene_id == scene_id)
+    scene.approval_state = "searching"
+    existing_path = videodesign_service_module.settings.storage_dir / project_id / "materials" / f"{scene_id}.mp4"
+    existing_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_path.write_bytes(b"already-downloaded")
+    videodesign_service.store.put(project)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("existing file should be recovered without re-downloading")
+
+    async def fake_proxy(asset, aspect_ratio):
+        return None
+
+    monkeypatch.setattr(videodesign_service, "_download_candidate", fail_if_called)
+    monkeypatch.setattr(videodesign_service_module, "_ensure_preview_proxy", fake_proxy)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/download",
+        json={"scene_ids": [scene_id]},
+    )
+
+    assert response.status_code == 200
+    asset = response.json()["assets"][0]
+    assert asset["source"] == "recovered"
+    project = videodesign_service.store.get(project_id)
+    scene = next(item for item in project.scenes if item.scene_id == scene_id)
+    assert scene.selected_candidate_id
+    assert scene.material_asset_id == asset["asset_id"]
+    assert scene.approval_state == "downloaded"
 
 
 def test_videodesign_prune_keeps_only_selected_candidate(monkeypatch):

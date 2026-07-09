@@ -871,46 +871,88 @@ class VideoDesignService:
         scenes = _selected_scenes(project, request.scene_ids)
         downloaded = []
         skipped = []
-        for scene in scenes:
+        total = len(scenes)
+        self._set_progress(project, "materials_download", "Preparing approved video downloads.", 0, total)
+        for index, scene in enumerate(scenes, start=1):
             if scene.material_asset_id and not request.force:
                 asset = _asset(project, scene.material_asset_id)
                 await _ensure_preview_proxy(asset, project.aspect_ratio)
                 downloaded.append(asset.model_dump())
+                self._set_progress(
+                    project,
+                    "materials_download",
+                    f"Scene {index}/{total} already has downloaded material.",
+                    index,
+                    total,
+                    {"scene_id": scene.scene_id, "asset_id": asset.asset_id},
+                )
                 continue
+            output_path = _material_output_path(project, scene)
             candidate = _approved_candidate_for_scene(project, scene)
+            if not candidate and not request.force:
+                candidate = _recover_candidate_for_existing_material(project, scene, output_path)
+            existing_asset = None if request.force else _recover_existing_material_asset(project, scene, candidate, output_path)
+            if existing_asset:
+                await _ensure_preview_proxy(existing_asset, project.aspect_ratio)
+                downloaded.append(existing_asset.model_dump())
+                self._set_progress(
+                    project,
+                    "materials_download",
+                    f"Recovered existing scene {index}/{total} material file.",
+                    index,
+                    total,
+                    {"scene_id": scene.scene_id, "asset_id": existing_asset.asset_id},
+                )
+                continue
             if not candidate:
                 skipped.append({"scene_id": scene.scene_id, "code": SCENE_NOT_READY, "message": "Scene has no approved candidate."})
+                self._set_progress(
+                    project,
+                    "materials_download",
+                    f"Skipped scene {index}/{total}: no approved candidate.",
+                    index,
+                    total,
+                    {"scene_id": scene.scene_id},
+                )
                 continue
             scene.approval_state = "download_pending"
-            asset_id = f"mat_{uuid.uuid4().hex}"
-            output_path = settings.storage_dir / project.project_id / "materials" / f"{scene.scene_id}.mp4"
+            self._set_progress(
+                project,
+                "materials_download",
+                f"Downloading scene {index}/{total}.",
+                index - 1,
+                total,
+                {"scene_id": scene.scene_id, "candidate_id": candidate.candidate_id, "source": candidate.source},
+            )
             try:
                 await self._download_candidate(candidate, output_path)
             except Exception as exc:
                 scene.approval_state = "approved"
+                self._set_progress(
+                    project,
+                    "materials_download_failed",
+                    f"Download failed at scene {index}/{total}: {exc}",
+                    index - 1,
+                    total,
+                    {"scene_id": scene.scene_id, "candidate_id": candidate.candidate_id, "source": candidate.source},
+                )
                 raise VideoDesignError(DOWNLOAD_FAILED, f"Could not download approved video: {exc}", retryable=True) from exc
-            asset = MaterialAsset(
-                asset_id=asset_id,
-                project_id=project.project_id,
-                scene_id=scene.scene_id,
-                candidate_id=candidate.candidate_id,
-                source=candidate.source,
-                source_result_id=candidate.source_result_id,
-                source_item_id=candidate.source_item_id,
-                source_url=candidate.source_url,
-                search_keyword=candidate.search_keyword,
-                douyin_result_id=candidate.douyin_result_id,
-                douyin_aweme_id=candidate.douyin_aweme_id,
-                local_path=str(output_path),
-                duration=candidate.duration,
-            )
+            asset = _material_asset_from_candidate(project, scene, candidate, output_path)
             await _ensure_preview_proxy(asset, project.aspect_ratio)
             project.material_assets.append(asset)
             scene.material_asset_id = asset.asset_id
             scene.clip = None
             scene.approval_state = "downloaded"
             downloaded.append(asset.model_dump())
-        self.store.put(project)
+            self._set_progress(
+                project,
+                "materials_download",
+                f"Downloaded scene {index}/{total}.",
+                index,
+                total,
+                {"scene_id": scene.scene_id, "asset_id": asset.asset_id},
+            )
+        self._set_progress(project, "idle", f"Downloaded {len(downloaded)} material file(s).", total, total)
         return {"success": True, "assets": downloaded, "skipped": skipped}
 
     def prune_material_candidates(self, project_id: str, request: MaterialsPruneRequest) -> dict:
@@ -1592,6 +1634,85 @@ def _asset(project: VideoDesignProject, asset_id: str) -> MaterialAsset:
         if asset.asset_id == asset_id:
             return asset
     raise VideoDesignError(DOWNLOAD_FAILED, "Material asset does not exist.")
+
+
+def _material_output_path(project: VideoDesignProject, scene: ScenePlan) -> Path:
+    return settings.storage_dir / project.project_id / "materials" / f"{scene.scene_id}.mp4"
+
+
+def _material_asset_from_candidate(
+    project: VideoDesignProject,
+    scene: ScenePlan,
+    candidate: MediaCandidate,
+    output_path: Path,
+) -> MaterialAsset:
+    return MaterialAsset(
+        asset_id=f"mat_{uuid.uuid4().hex}",
+        project_id=project.project_id,
+        scene_id=scene.scene_id,
+        candidate_id=candidate.candidate_id,
+        source=candidate.source,
+        source_result_id=candidate.source_result_id,
+        source_item_id=candidate.source_item_id,
+        source_url=candidate.source_url,
+        search_keyword=candidate.search_keyword,
+        douyin_result_id=candidate.douyin_result_id,
+        douyin_aweme_id=candidate.douyin_aweme_id,
+        local_path=str(output_path),
+        duration=candidate.duration,
+    )
+
+
+def _recover_candidate_for_existing_material(
+    project: VideoDesignProject,
+    scene: ScenePlan,
+    output_path: Path,
+) -> MediaCandidate | None:
+    if not output_path.exists() or output_path.stat().st_size <= 0:
+        return None
+    if scene.selected_candidate_id:
+        try:
+            candidate = _candidate(project, scene.selected_candidate_id)
+            candidate.status = "approved"
+            return candidate
+        except VideoDesignError:
+            pass
+    candidate = MediaCandidate(
+        candidate_id=f"cand_recovered_{uuid.uuid4().hex}",
+        source="recovered",
+        scene_id=scene.scene_id,
+        title=f"Recovered local material for scene {scene.order}",
+        search_keyword=", ".join(scene.matching_keywords),
+        status="approved",
+    )
+    project.candidates.append(candidate)
+    scene.selected_candidate_id = candidate.candidate_id
+    return candidate
+
+
+def _recover_existing_material_asset(
+    project: VideoDesignProject,
+    scene: ScenePlan,
+    candidate: MediaCandidate,
+    output_path: Path,
+) -> MaterialAsset | None:
+    if not output_path.exists() or output_path.stat().st_size <= 0:
+        return None
+    existing = next(
+        (
+            asset
+            for asset in project.material_assets
+            if asset.scene_id == scene.scene_id and Path(asset.local_path) == output_path
+        ),
+        None,
+    )
+    asset = existing or _material_asset_from_candidate(project, scene, candidate, output_path)
+    if not existing:
+        project.material_assets.append(asset)
+    scene.material_asset_id = asset.asset_id
+    scene.clip = None
+    scene.approval_state = "downloaded"
+    return asset
 
 
 def _candidates_for_scene(project: VideoDesignProject, scene_id: str, source: str | None = None) -> list[MediaCandidate]:
