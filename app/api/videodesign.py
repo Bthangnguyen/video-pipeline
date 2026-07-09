@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, File, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.videodesign.errors import AUDIO_NOT_FOUND, PROJECT_NOT_FOUND, SCENE_NOT_FOUND, VideoDesignError
@@ -41,6 +41,14 @@ async def health():
 async def create_project(request: CreateProjectRequest):
     try:
         return videodesign_service.create_project(request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects")
+async def list_projects():
+    try:
+        return videodesign_service.list_projects()
     except VideoDesignError as error:
         return error_response(error)
 
@@ -303,7 +311,7 @@ async def sfx_catalog():
 @router.get("/sfx/{asset_id}/file")
 async def sfx_file(asset_id: str):
     try:
-        return FileResponse(videodesign_service.sfx_file_path(asset_id), media_type="audio/wav")
+        return FileResponse(videodesign_service.sfx_file_path(asset_id))
     except VideoDesignError as error:
         return error_response(error)
 
@@ -352,6 +360,48 @@ async def render_preview(project_id: str):
 async def preview_file(project_id: str):
     try:
         return FileResponse(videodesign_service.smooth_preview_file_path(project_id), media_type="video/mp4")
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/export/render")
+async def render_export(project_id: str):
+    try:
+        return await videodesign_service.render_export(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/export/file")
+async def export_file(project_id: str):
+    try:
+        return FileResponse(
+            videodesign_service.export_file_path(project_id),
+            media_type="video/mp4",
+            filename=videodesign_service.export_filename(project_id),
+        )
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/music/upload")
+async def upload_background_music(project_id: str, file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+        return videodesign_service.upload_background_music(
+            project_id,
+            file.filename or "background-music",
+            content,
+            file.content_type or "",
+        )
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/music/{item_id}/file")
+async def background_music_file(project_id: str, item_id: str):
+    try:
+        return FileResponse(videodesign_service.background_music_file_path(project_id, item_id))
     except VideoDesignError as error:
         return error_response(error)
 

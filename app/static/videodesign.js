@@ -1,6 +1,7 @@
 const state = {
   projectId: "",
   project: null,
+  projects: [],
   rows: [],
   timeline: null,
   activeView: "start",
@@ -11,6 +12,7 @@ const state = {
   previewMode: "realtime",
   sfxCatalog: [],
   sfxSuggestions: [],
+  sfxTransitionPresets: [],
   sfxCatalogLoading: false,
   materialHealth: null,
   materialCoverCache: {},
@@ -57,6 +59,7 @@ function init() {
   updateDurationLabel();
   navigate("start");
   restoreProject();
+  loadProjectList();
 }
 
 function bindEvents() {
@@ -66,10 +69,14 @@ function bindEvents() {
 
   document.getElementById("start-duration").addEventListener("input", updateDurationLabel);
   document.getElementById("create-project").addEventListener("click", createProject);
+  document.getElementById("refresh-projects").addEventListener("click", loadProjectList);
   document.getElementById("load-saved-project").addEventListener("click", () => {
     const projectId = localStorage.getItem("videodesignProjectId");
     if (projectId) loadProject(projectId, "script");
-    else setStatus("No saved project found.", "error");
+    else {
+      loadProjectList();
+      setStatus("Choose a project from the list.", "idle");
+    }
   });
 
   document.getElementById("script-editor").addEventListener("input", updateScriptMetrics);
@@ -106,6 +113,24 @@ function bindEvents() {
     state.preset.voiceover.voice_id = document.getElementById("voice-id").value.trim() || "en-US-AriaNeural";
     renderSummaryRails();
   });
+  document.getElementById("voice-speed").addEventListener("input", () => {
+    state.preset.voiceover.voice_speed = Number(document.getElementById("voice-speed").value || 1);
+    updateVoiceSpeedLabel();
+    renderSummaryRails();
+  });
+  document.getElementById("preview-voice").addEventListener("click", previewSelectedVoice);
+  ["preset-video-flip", "preset-video-brightness", "preset-video-contrast", "preset-video-saturation"].forEach((id) => {
+    document.getElementById(id).addEventListener("input", () => {
+      state.preset.video_defaults = {
+        ...(state.preset.video_defaults || {}),
+        flip_horizontal: inputChecked("preset-video-flip", false),
+        brightness: Number(inputValue("preset-video-brightness", 1)),
+        contrast: Number(inputValue("preset-video-contrast", 1.08)),
+        saturation: Number(inputValue("preset-video-saturation", 1.08)),
+      };
+      renderSummaryRails();
+    });
+  });
 
   document.getElementById("generate-tts").addEventListener("click", generateTts);
   document.getElementById("save-scene").addEventListener("click", saveSelectedScene);
@@ -127,12 +152,16 @@ function bindEvents() {
   document.getElementById("clear-timeline").addEventListener("click", clearTimeline);
   document.getElementById("build-smooth-preview").addEventListener("click", buildSmoothPreview);
   document.getElementById("toggle-smooth-preview").addEventListener("click", toggleSmoothPreviewMode);
+  document.getElementById("render-export").addEventListener("click", renderExportVideo);
+  document.getElementById("download-export").addEventListener("click", downloadExportVideo);
   document.getElementById("studio-play").addEventListener("click", toggleStudioPlayback);
   bindStudioVideoEvents(document.getElementById("studio-video"));
   bindStudioVideoEvents(document.getElementById("studio-next-video"));
   document.getElementById("studio-audio").addEventListener("timeupdate", onStudioAudioTimeUpdate);
   document.getElementById("studio-audio").addEventListener("play", updateStudioPlaybackButton);
   document.getElementById("studio-audio").addEventListener("pause", updateStudioPlaybackButton);
+  document.getElementById("studio-music").addEventListener("play", updateStudioPlaybackButton);
+  document.getElementById("studio-music").addEventListener("pause", updateStudioPlaybackButton);
   document.getElementById("timeline-fit").addEventListener("click", fitTimeline);
   document.getElementById("timeline-zoom-out").addEventListener("click", () => zoomTimeline(-1));
   document.getElementById("timeline-zoom-in").addEventListener("click", () => zoomTimeline(1));
@@ -178,7 +207,7 @@ async function createProject() {
       body: {
         idea: looksLikeScript ? null : prompt,
         script: looksLikeScript ? prompt : null,
-        target_platform: document.getElementById("start-platform").value,
+        target_platform: "short_vertical",
         aspect_ratio: "9:16",
         target_duration_seconds: Number(document.getElementById("start-duration").value || 45),
         language: "en",
@@ -190,6 +219,7 @@ async function createProject() {
     localStorage.setItem("videodesignProjectId", state.projectId);
     hydrateProjectFields();
     await savePreset();
+    await loadProjectList();
     navigate("script");
   });
 }
@@ -205,8 +235,59 @@ async function loadProject(projectId, preferredView = null) {
     hydrateProjectFields();
     await loadReview();
     await loadTimeline();
+    renderProjectList();
     navigate(preferredView || (state.timeline ? "studio" : "script"));
   });
+}
+
+async function loadProjectList() {
+  try {
+    const data = await api("/api/videodesign/projects");
+    state.projects = data.projects || [];
+    renderProjectList();
+  } catch (error) {
+    const library = document.getElementById("project-library");
+    if (library) library.innerHTML = `<div class="vd-empty">Could not load projects.</div>`;
+  }
+}
+
+function renderProjectList() {
+  const library = document.getElementById("project-library");
+  if (!library) return;
+  if (!state.projects.length) {
+    library.innerHTML = `<div class="vd-empty">No saved projects yet.</div>`;
+    return;
+  }
+  library.innerHTML = state.projects.slice(0, 12).map((project) => `
+    <button class="vd-project-card" data-open-project="${escapeHtml(project.project_id)}" data-active="${project.project_id === state.projectId ? "true" : "false"}" type="button">
+      <strong>${escapeHtml(project.title || project.project_id)}</strong>
+      <span>${escapeHtml(projectStageLabel(project.stage))} / ${escapeHtml(project.aspect_ratio || "9:16")}</span>
+      <em>${project.scene_count || 0} scenes / ${project.downloaded_count || 0} media / ${formatDuration(project.timeline_duration_seconds || project.target_duration_seconds || 0)}</em>
+      <small>${escapeHtml(formatProjectDate(project.created_at))}</small>
+    </button>
+  `).join("");
+  library.querySelectorAll("[data-open-project]").forEach((button) => {
+    button.addEventListener("click", () => loadProject(button.dataset.openProject));
+  });
+}
+
+function projectStageLabel(stage) {
+  return {
+    idea: "Idea",
+    script: "Script",
+    plan: "Plan",
+    review_materials: "Review",
+    materials_downloaded: "Materials",
+    studio: "Studio",
+    export_ready: "Export ready",
+  }[stage] || "Project";
+}
+
+function formatProjectDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 async function saveProjectPatch(patch) {
@@ -295,11 +376,35 @@ async function savePreset() {
   state.preset.scene_media.translate_to_chinese = inputChecked("preset-translate", true);
   state.preset.voiceover.provider = inputValue("tts-provider", state.preset.voiceover.provider || "free_tts");
   state.preset.voiceover.voice_id = inputValue("voice-id", state.preset.voiceover.voice_id || "en-US-AriaNeural").trim() || "en-US-AriaNeural";
+  state.preset.voiceover.voice_speed = clamp(Number(inputValue("voice-speed", state.preset.voiceover.voice_speed || 1)), 0.8, 1.25);
+  state.preset.video_defaults = {
+    ...(state.preset.video_defaults || {}),
+    flip_horizontal: inputChecked("preset-video-flip", false),
+    brightness: Number(inputValue("preset-video-brightness", 1)),
+    contrast: Number(inputValue("preset-video-contrast", 1.08)),
+    saturation: Number(inputValue("preset-video-saturation", 1.08)),
+  };
   const data = await api(`/api/videodesign/projects/${state.projectId}/preset`, {
     method: "PATCH",
     body: state.preset,
   });
   state.project = data.project;
+}
+
+function previewSelectedVoice() {
+  const synth = window.speechSynthesis;
+  if (!synth) {
+    setStatus("Voice preview is not supported in this browser.", "error");
+    return;
+  }
+  synth.cancel();
+  const utterance = new SpeechSynthesisUtterance("This is a short preview of the selected voice and reading speed.");
+  utterance.lang = inputValue("voice-id", "en-US-AriaNeural").startsWith("en-GB") ? "en-GB" : "en-US";
+  utterance.rate = clamp(Number(inputValue("voice-speed", 1)), 0.8, 1.25);
+  const browserVoices = synth.getVoices();
+  const preferred = browserVoices.find((voice) => voice.lang === utterance.lang) || browserVoices.find((voice) => voice.lang?.startsWith("en"));
+  if (preferred) utterance.voice = preferred;
+  synth.speak(utterance);
 }
 
 async function generateTts() {
@@ -311,6 +416,7 @@ async function generateTts() {
       body: {
         provider: state.preset.voiceover.provider,
         voice_id: state.preset.voiceover.voice_id,
+        voice_speed: state.preset.voiceover.voice_speed || 1,
       },
     });
     state.project = data.project || state.project;
@@ -389,11 +495,12 @@ async function loadSmoothPreview(options = {}) {
 }
 
 async function loadSfxCatalog(options = {}) {
-  if (state.sfxCatalogLoading || state.sfxCatalog.length) return state.sfxCatalog;
+  if (state.sfxCatalogLoading || (state.sfxCatalog.length && state.sfxTransitionPresets.length)) return state.sfxCatalog;
   state.sfxCatalogLoading = true;
   try {
     const data = await api("/api/videodesign/sfx/catalog");
     state.sfxCatalog = data.items || [];
+    state.sfxTransitionPresets = data.transition_presets || [];
     if (options.render !== false) renderStudio();
   } finally {
     state.sfxCatalogLoading = false;
@@ -708,6 +815,32 @@ async function buildSmoothPreview() {
   });
 }
 
+async function renderExportVideo() {
+  ensureProject();
+  if (!state.timeline) throw new Error("Create a Studio timeline first.");
+  await run("Rendering export MP4", async () => {
+    state.timelinePlaying = false;
+    pauseStudioMedia();
+    state.smoothPreview = { ...(state.smoothPreview || defaultSmoothPreview()), status: "rendering", error: {} };
+    renderSmoothPreviewControls();
+    const data = await api(`/api/videodesign/projects/${state.projectId}/export/render`, { method: "POST" });
+    state.smoothPreview = data.preview || defaultSmoothPreview();
+    state.previewMode = smoothPreviewUsable() ? "smooth" : "realtime";
+    await loadProjectList();
+    seekTimeline(state.timelinePlayheadSeconds || 0);
+    setStatus("Export MP4 is ready to download.", "idle");
+  });
+}
+
+function downloadExportVideo() {
+  ensureProject();
+  if (state.smoothPreview?.status !== "ready" || !state.smoothPreview?.preview_url) {
+    setStatus("Render export first.", "error");
+    return;
+  }
+  window.location.href = `/api/videodesign/projects/${state.projectId}/export/file`;
+}
+
 function toggleSmoothPreviewMode() {
   if (state.previewMode === "smooth") {
     state.previewMode = "realtime";
@@ -767,6 +900,7 @@ function navigate(view) {
 
 function renderAll() {
   renderProjectChip();
+  renderProjectList();
   renderTemplateSelections();
   renderSummaryRails();
   renderSceneRails();
@@ -789,7 +923,8 @@ function renderSummaryRails() {
     ${summaryRow("Text style", captionLabel(state.preset.captions.style_id))}
     ${summaryRow("Transition", transitionLabel(state.preset.extras.transition_pack_id))}
     ${summaryRow("Overlay", overlayLabel(state.preset.extras.overlay_pack_id))}
-    ${summaryRow("Voiceover", `${state.preset.voiceover.provider} - ${state.preset.voiceover.voice_id}`)}
+    ${summaryRow("Video defaults", videoDefaultsLabel(state.preset.video_defaults))}
+    ${summaryRow("Voiceover", `${voiceLabel(state.preset.voiceover.voice_id)} - ${Number(state.preset.voiceover.voice_speed || 1).toFixed(2)}x`)}
     <button class="vd-primary" data-summary-action="save-template" type="button">Save preset and continue</button>
   `;
   document.querySelectorAll(".vd-summary-rail").forEach((rail) => {
@@ -1208,6 +1343,8 @@ function markSmoothPreviewStale() {
 function renderSmoothPreviewControls() {
   const build = document.getElementById("build-smooth-preview");
   const toggle = document.getElementById("toggle-smooth-preview");
+  const renderExport = document.getElementById("render-export");
+  const downloadExport = document.getElementById("download-export");
   const label = document.getElementById("smooth-preview-status");
   const preview = state.smoothPreview || defaultSmoothPreview();
   if (build) {
@@ -1218,6 +1355,13 @@ function renderSmoothPreviewControls() {
     toggle.disabled = !smoothPreviewUsable();
     toggle.dataset.active = smoothPreviewActive() ? "true" : "false";
     toggle.textContent = smoothPreviewActive() ? "Use realtime preview" : "Use smooth preview";
+  }
+  if (renderExport) {
+    renderExport.disabled = !state.timeline || preview.status === "rendering" || state.running;
+    renderExport.textContent = preview.status === "rendering" ? "Rendering..." : preview.status === "ready" ? "Re-render export" : "Render export";
+  }
+  if (downloadExport) {
+    downloadExport.disabled = preview.status !== "ready" || !preview.preview_url || preview.status === "rendering";
   }
   if (label) {
     label.dataset.status = preview.status || "missing";
@@ -1438,10 +1582,19 @@ function renderAudioPanel(panel) {
     loadSfxCatalog({ render: true }).catch(() => {});
   }
   const sfxItems = timelineItems().filter((item) => item.type === "sfx");
+  const musicItem = backgroundMusicItem();
   const proposed = state.sfxSuggestions.filter((item) => item.status === "proposed");
   const applied = state.sfxSuggestions.filter((item) => item.status === "applied");
   panel.innerHTML = `
     <h3>Audio</h3>
+    <section class="vd-audio-section">
+      <strong>Background Music</strong>
+      <div class="vd-music-upload">
+        <input id="music-file" type="file" accept="audio/*">
+        <button id="upload-music" type="button">Upload music</button>
+      </div>
+      ${musicItem ? backgroundMusicControlsHtml(musicItem) : `<div class="vd-empty">No background music track.</div>`}
+    </section>
     <section class="vd-audio-section">
       <strong>Event-driven SFX</strong>
       <p class="vd-muted">Suggestions come from transitions, text, icons, hook moments, and important caption words.</p>
@@ -1458,6 +1611,10 @@ function renderAudioPanel(panel) {
       ${proposed.length ? proposed.map((suggestion) => sfxSuggestionRow(suggestion)).join("") : `<div class="vd-empty">Generate suggestions to place SFX automatically.</div>`}
     </section>
     <section class="vd-audio-section">
+      <strong>Transition SFX rules</strong>
+      ${state.sfxTransitionPresets.length ? transitionSfxRulesHtml() : `<div class="vd-muted">Loading transition SFX rules...</div>`}
+    </section>
+    <section class="vd-audio-section">
       <strong>SFX catalog</strong>
       ${state.sfxCatalog.length ? state.sfxCatalog.map((asset) => `
         <div class="vd-sfx-row">
@@ -1470,6 +1627,18 @@ function renderAudioPanel(panel) {
       `).join("") : `<div class="vd-muted">Loading SFX catalog...</div>`}
     </section>
   `;
+  panel.querySelector("#upload-music")?.addEventListener("click", uploadBackgroundMusic);
+  panel.querySelector("#save-music")?.addEventListener("click", saveBackgroundMusic);
+  panel.querySelector("#remove-music")?.addEventListener("click", () => {
+    const item = backgroundMusicItem();
+    if (item) deleteTimelineItem(item.item_id);
+  });
+  panel.querySelector("#music-volume")?.addEventListener("input", () => updateMusicSliderLabel("music-volume", "music-volume-label"));
+  panel.querySelector("#music-ducking-volume")?.addEventListener("input", () => updateMusicSliderLabel("music-ducking-volume", "music-ducking-volume-label"));
+  panel.querySelector("#music-trim-start")?.addEventListener("input", () => updateMusicTrimControls("start"));
+  panel.querySelector("#music-trim-end")?.addEventListener("input", () => updateMusicTrimControls("end"));
+  panel.querySelector("#music-trim-start-range")?.addEventListener("input", () => updateMusicTrimControls("start_range"));
+  panel.querySelector("#music-trim-end-range")?.addEventListener("input", () => updateMusicTrimControls("end_range"));
   panel.querySelector("#generate-sfx")?.addEventListener("click", generateSfxSuggestions);
   panel.querySelector("#apply-sfx")?.addEventListener("click", applySelectedSfxSuggestions);
   panel.querySelector("#clear-sfx")?.addEventListener("click", clearTimelineSfx);
@@ -1477,24 +1646,182 @@ function renderAudioPanel(panel) {
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      previewSfx(button.dataset.previewSfx);
+      previewSfx(button.dataset.previewSfx, sfxPreviewVolume(button));
+    });
+  });
+  panel.querySelectorAll("[data-sfx-volume]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const label = panel.querySelector(`[data-sfx-volume-label="${CSS.escape(input.dataset.sfxVolume)}"]`);
+      if (label) label.textContent = `${Math.round(Number(input.value || 0) * 100)}%`;
+      const suggestion = state.sfxSuggestions.find((item) => item.suggestion_id === input.dataset.sfxVolume);
+      if (suggestion) suggestion.volume = Number(input.value || suggestion.volume || 0.35);
     });
   });
 }
 
+function backgroundMusicControlsHtml(item) {
+  const style = item.style || {};
+  const volume = clamp(Number(style.volume ?? 0.16), 0, 1);
+  const duckingVolume = clamp(Number(style.ducking_volume ?? 0.08), 0, 1);
+  const sourceDuration = Math.max(0.05, Number(item.source_ref?.duration_seconds || 0.05));
+  const trimStart = clamp(Number(item.source_ref?.trim_start_seconds || 0), 0, Math.max(0, sourceDuration - 0.05));
+  const trimEnd = clamp(Number(item.source_ref?.trim_end_seconds || sourceDuration), trimStart + 0.05, sourceDuration);
+  return `
+    <div class="vd-music-card">
+      <div>
+        <b>${escapeHtml(item.source_ref?.name || "Background music")}</b>
+        <span>${formatDuration(sourceDuration)} source / trim <b id="music-trim-label">${formatDuration(trimStart)}-${formatDuration(trimEnd)}</b> / timeline ${formatDuration(item.end_seconds - item.start_seconds)}</span>
+      </div>
+      <audio controls preload="none" src="${escapeHtml(item.source_ref?.audio_url || "")}"></audio>
+      <label class="vd-music-control">Volume
+        <input id="music-volume" type="range" min="0" max="100" step="1" value="${Math.round(volume * 100)}">
+        <b id="music-volume-label">${Math.round(volume * 100)}%</b>
+      </label>
+      <label class="vd-music-control">Voice ducking
+        <input id="music-ducking-volume" type="range" min="0" max="100" step="1" value="${Math.round(duckingVolume * 100)}">
+        <b id="music-ducking-volume-label">${Math.round(duckingVolume * 100)}%</b>
+      </label>
+      <div class="vd-music-trim">
+        <label>Trim start <input id="music-trim-start" type="number" min="0" max="${sourceDuration.toFixed(2)}" step="0.1" value="${trimStart.toFixed(2)}"></label>
+        <label>Trim end <input id="music-trim-end" type="number" min="0.05" max="${sourceDuration.toFixed(2)}" step="0.1" value="${trimEnd.toFixed(2)}"></label>
+        <input id="music-trim-start-range" type="range" min="0" max="${sourceDuration.toFixed(2)}" step="0.1" value="${trimStart.toFixed(2)}">
+        <input id="music-trim-end-range" type="range" min="0.05" max="${sourceDuration.toFixed(2)}" step="0.1" value="${trimEnd.toFixed(2)}">
+      </div>
+      <div class="vd-form-grid">
+        <label>Fade in <input id="music-fade-in" type="number" min="0" max="10" step="0.1" value="${Number(style.fade_in_seconds ?? 1)}"></label>
+        <label>Fade out <input id="music-fade-out" type="number" min="0" max="10" step="0.1" value="${Number(style.fade_out_seconds ?? 1)}"></label>
+      </div>
+      <div class="vd-button-row">
+        <label><input id="music-ducking" type="checkbox" ${style.ducking !== false ? "checked" : ""}> Duck under voice</label>
+        <label><input id="music-loop" type="checkbox" ${style.loop !== false ? "checked" : ""}> Loop</label>
+      </div>
+      <div class="vd-button-row">
+        <button id="save-music" type="button">Save music mix</button>
+        <button id="remove-music" class="vd-danger" type="button">Remove music</button>
+      </div>
+    </div>
+  `;
+}
+
 function sfxSuggestionRow(suggestion) {
   const asset = sfxAsset(suggestion.asset_id);
+  const volume = clamp(Number(suggestion.volume ?? asset?.default_volume ?? 0.35), 0, 1);
   return `
-    <label class="vd-sfx-row">
+    <div class="vd-sfx-row vd-sfx-suggestion">
       <input data-sfx-suggestion-id="${suggestion.suggestion_id}" type="checkbox" checked>
       <div>
         <b>${escapeHtml(suggestion.label)}</b>
         <span>${formatDuration(suggestion.time_seconds)} / ${escapeHtml(suggestion.event_type.replaceAll("_", " "))}</span>
         <em>${escapeHtml(suggestion.reason)}</em>
+        <div class="vd-sfx-volume-row">
+          <span>Volume</span>
+          <input data-sfx-volume="${escapeHtml(suggestion.suggestion_id)}" type="range" min="0" max="1" step="0.01" value="${volume}">
+          <b data-sfx-volume-label="${escapeHtml(suggestion.suggestion_id)}">${Math.round(volume * 100)}%</b>
+        </div>
       </div>
-      <button data-preview-sfx="${suggestion.asset_id}" type="button">${escapeHtml(asset?.name || suggestion.asset_id)}</button>
-    </label>
+      <button data-preview-sfx="${suggestion.asset_id}" data-preview-sfx-suggestion="${escapeHtml(suggestion.suggestion_id)}" type="button">${escapeHtml(asset?.name || suggestion.asset_id)}</button>
+    </div>
   `;
+}
+
+function transitionSfxRulesHtml() {
+  const order = ["fade", "dissolve", "slide_left", "slide_right", "slide_up", "whip_pan", "zoom_in", "zoom_out", "flash_cut", "none"];
+  const presets = [...state.sfxTransitionPresets].sort((a, b) => {
+    const ai = order.indexOf(a.transition_id);
+    const bi = order.indexOf(b.transition_id);
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+  });
+  return presets.map((preset) => `
+    <div class="vd-sfx-rule">
+      <span>${escapeHtml(transitionLabel(preset.transition_id))}</span>
+      <b>${preset.enabled ? escapeHtml(preset.asset_name || preset.category) : "No SFX"}</b>
+      <em>${preset.enabled ? `${Math.round(Number(preset.volume || 0) * 100)}% / ${formatDuration(preset.duration_seconds || 0)}` : "manual only"}</em>
+    </div>
+  `).join("");
+}
+
+function backgroundMusicItem() {
+  return timelineItems().find((item) => item.type === "music") || null;
+}
+
+function updateMusicSliderLabel(inputId, labelId) {
+  const input = document.getElementById(inputId);
+  const label = document.getElementById(labelId);
+  if (input && label) label.textContent = `${Math.round(Number(input.value || 0))}%`;
+}
+
+function updateMusicTrimControls(source) {
+  const item = backgroundMusicItem();
+  const duration = Math.max(0.05, Number(item?.source_ref?.duration_seconds || 0.05));
+  const startInput = document.getElementById("music-trim-start");
+  const endInput = document.getElementById("music-trim-end");
+  const startRange = document.getElementById("music-trim-start-range");
+  const endRange = document.getElementById("music-trim-end-range");
+  if (!startInput || !endInput || !startRange || !endRange) return;
+  if (source === "start_range") startInput.value = startRange.value;
+  if (source === "end_range") endInput.value = endRange.value;
+  let start = clamp(Number(startInput.value || 0), 0, Math.max(0, duration - 0.05));
+  let end = clamp(Number(endInput.value || duration), 0.05, duration);
+  if (source.startsWith("start") && start >= end - 0.05) end = clamp(start + 0.05, 0.05, duration);
+  if (source.startsWith("end") && end <= start + 0.05) start = clamp(end - 0.05, 0, duration - 0.05);
+  startInput.value = start.toFixed(2);
+  endInput.value = end.toFixed(2);
+  startRange.value = start.toFixed(2);
+  endRange.value = end.toFixed(2);
+  const label = document.getElementById("music-trim-label");
+  if (label) label.textContent = `${formatDuration(start)}-${formatDuration(end)}`;
+}
+
+async function uploadBackgroundMusic() {
+  const input = document.getElementById("music-file");
+  const file = input?.files?.[0];
+  if (!file) {
+    setStatus("Choose an audio file first.", "error");
+    return;
+  }
+  const formData = new FormData();
+  formData.append("file", file);
+  await run("Uploading background music", async () => {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/music/upload`, {
+      method: "POST",
+      formData,
+    });
+    state.timeline = data.timeline;
+    markSmoothPreviewStale();
+    setStatus("Background music added.", "idle");
+  });
+}
+
+async function saveBackgroundMusic() {
+  const item = backgroundMusicItem();
+  if (!item) return;
+  const sourceDuration = Math.max(0.05, Number(item.source_ref?.duration_seconds || 0.05));
+  const trimStart = clamp(Number(inputValue("music-trim-start", 0)), 0, Math.max(0, sourceDuration - 0.05));
+  const trimEnd = clamp(Number(inputValue("music-trim-end", sourceDuration)), trimStart + 0.05, sourceDuration);
+  const style = {
+    ...(item.style || {}),
+    enabled: true,
+    volume: clamp(Number(inputValue("music-volume", 16)) / 100, 0, 1),
+    ducking: inputChecked("music-ducking", true),
+    ducking_volume: clamp(Number(inputValue("music-ducking-volume", 8)) / 100, 0, 1),
+    fade_in_seconds: clamp(Number(inputValue("music-fade-in", 1)), 0, 10),
+    fade_out_seconds: clamp(Number(inputValue("music-fade-out", 1)), 0, 10),
+    loop: inputChecked("music-loop", true),
+  };
+  const sourceRef = {
+    ...(item.source_ref || {}),
+    trim_start_seconds: Number(trimStart.toFixed(3)),
+    trim_end_seconds: Number(trimEnd.toFixed(3)),
+  };
+  await run("Saving background music", async () => {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/timeline/items/${item.item_id}`, {
+      method: "PATCH",
+      body: { style, source_ref: sourceRef },
+    });
+    replaceTimelineItem(data.item);
+    markSmoothPreviewStale();
+    setStatus("Background music mix saved.", "idle");
+  });
 }
 
 async function generateSfxSuggestions() {
@@ -1523,9 +1850,14 @@ async function applySelectedSfxSuggestions() {
     return;
   }
   await run("Applying SFX", async () => {
+    const volumeOverrides = {};
+    for (const id of ids) {
+      const input = document.querySelector(`[data-sfx-volume="${CSS.escape(id)}"]`);
+      if (input) volumeOverrides[id] = clamp(Number(input.value || 0.35), 0, 1);
+    }
     const data = await api(`/api/videodesign/projects/${state.projectId}/sfx/apply`, {
       method: "POST",
-      body: { suggestion_ids: ids },
+      body: { suggestion_ids: ids, volume_overrides: volumeOverrides },
     });
     state.timeline = data.timeline;
     state.sfxSuggestions = data.suggestions || state.sfxSuggestions;
@@ -1547,11 +1879,18 @@ async function clearTimelineSfx() {
   });
 }
 
-function previewSfx(assetId) {
+function sfxPreviewVolume(button) {
+  const suggestionId = button.dataset.previewSfxSuggestion;
+  if (!suggestionId) return undefined;
+  const input = document.querySelector(`[data-sfx-volume="${CSS.escape(suggestionId)}"]`);
+  return input ? clamp(Number(input.value || 0.35), 0, 1) : undefined;
+}
+
+function previewSfx(assetId, volumeOverride = undefined) {
   const asset = sfxAsset(assetId);
   const url = asset?.audio_url || `/api/videodesign/sfx/${assetId}/file`;
   const audio = new Audio(url);
-  audio.volume = Math.min(0.8, Number(asset?.default_volume || 0.35) * 1.4);
+  audio.volume = clamp(Number(volumeOverride ?? Math.min(0.8, Number(asset?.default_volume || 0.35) * 1.4)), 0, 1);
   const promise = audio.play();
   if (promise?.catch) promise.catch(() => setStatus("Browser blocked SFX preview. Try clicking Play again.", "error"));
 }
@@ -2094,12 +2433,14 @@ function renderStudioStage() {
   const row = selectedRow();
   const media = timelineItems().find((item) => item.type === "media" && item.scene_id === row?.scene.scene_id);
   const audioItem = timelineItems().find((item) => item.type === "audio" && item.scene_id === row?.scene.scene_id);
+  const musicItem = backgroundMusicItem();
   const text = timelineItems().find((item) => item.type === "text" && item.scene_id === row?.scene.scene_id);
   const caption = timelineItems().find((item) => item.type === "caption" && item.scene_id === row?.scene.scene_id);
   const overlay = timelineItems().find((item) => item.type === "overlay" && item.scene_id === row?.scene.scene_id);
   const video = document.getElementById("studio-video");
   const nextVideo = document.getElementById("studio-next-video");
   const audio = document.getElementById("studio-audio");
+  const music = document.getElementById("studio-music");
   const captionEl = document.getElementById("studio-caption");
   const textEl = document.getElementById("studio-text");
   const stage = document.getElementById("studio-stage");
@@ -2120,6 +2461,7 @@ function renderStudioStage() {
       nextVideo.load();
     }
     setPlaybackElementSource(audio, "");
+    setPlaybackElementSource(music, "");
     video.dataset.baseTransform = "";
     video.dataset.transitionTransform = "";
     video.style.transform = "";
@@ -2140,6 +2482,11 @@ function renderStudioStage() {
   } else {
     const mediaChanged = setPlaybackElementSource(video, media?.source_ref?.media_url || "");
     const audioChanged = setPlaybackElementSource(audio, voiceoverTrack?.audio_url || audioItem?.source_ref?.audio_url || "");
+    const musicChanged = setPlaybackElementSource(music, musicItem?.style?.enabled === false ? "" : (musicItem?.source_ref?.audio_url || ""));
+    if (music) {
+      music.loop = Boolean(musicItem?.style?.loop !== false);
+      music.volume = musicPreviewVolume(musicItem);
+    }
     applyStudioMediaEffects(video, media);
     if (mediaChanged && media && !state.timelinePlaying) {
       const setInitialCutTime = () => {
@@ -2164,10 +2511,21 @@ function renderStudioStage() {
       if (audio.readyState > 0) resetAudio();
       else audio.addEventListener("loadedmetadata", resetAudio, { once: true });
     }
+    if (musicChanged && music && musicItem && !state.timelinePlaying) {
+      const resetMusic = () => {
+        try {
+          music.currentTime = musicLocalTime(state.timelinePlayheadSeconds || media?.start_seconds || 0, musicItem);
+        } catch {
+          return;
+        }
+      };
+      if (music.readyState > 0) resetMusic();
+      else music.addEventListener("loadedmetadata", resetMusic, { once: true });
+    }
   }
 
   sceneLabel.textContent = row ? `Scene ${row.scene.order}` : "No scene selected";
-  mediaState.textContent = useSmoothPreview ? smoothPreviewStatusLabel(state.smoothPreview) : studioMediaStateLabel(media, audioItem, voiceoverTrack);
+  mediaState.textContent = useSmoothPreview ? smoothPreviewStatusLabel(state.smoothPreview) : studioMediaStateLabel(media, audioItem, voiceoverTrack, musicItem);
   stage.dataset.overlay = overlayIdForItem(overlay);
   stage.style.setProperty("--scene-overlay-opacity", String(Number(overlay?.style?.opacity ?? 0.35)));
   stage.dataset.captionStyle = caption?.style?.caption_style_id || state.preset.captions.style_id || "bold_outline";
@@ -2312,11 +2670,13 @@ function renderStudioIcons() {
   });
 }
 
-function studioMediaStateLabel(media, audioItem, voiceoverTrack = combinedVoiceoverTrack()) {
+function studioMediaStateLabel(media, audioItem, voiceoverTrack = combinedVoiceoverTrack(), musicItem = backgroundMusicItem()) {
   if (!media?.source_ref?.media_url) return "No media";
   const cutLabel = `Cut ${formatDuration(mediaTrimStart(media))}-${formatDuration(mediaTrimEnd(media))}`;
-  if (voiceoverTrack?.audio_url) return `${trimStatusLabel(media)} / ${cutLabel} + project voice`;
-  return `${trimStatusLabel(media)} / ${cutLabel}${audioItem?.source_ref?.audio_url ? " + voice" : " / no voice"}`;
+  const voice = voiceoverTrack?.audio_url || audioItem?.source_ref?.audio_url ? " + voice" : " / no voice";
+  const music = musicItem?.source_ref?.audio_url && musicItem.style?.enabled !== false ? " + music" : "";
+  if (voiceoverTrack?.audio_url) return `${trimStatusLabel(media)} / ${cutLabel} + project voice${music}`;
+  return `${trimStatusLabel(media)} / ${cutLabel}${voice}${music}`;
 }
 
 function renderStudioInspector() {
@@ -2445,7 +2805,7 @@ function niceTimelineStep(rawStep) {
 }
 
 function editableTimelineItem(item) {
-  return ["media", "text", "caption", "overlay", "icon", "transition", "sfx"].includes(item?.type);
+  return ["media", "text", "caption", "overlay", "icon", "transition", "music", "sfx"].includes(item?.type);
 }
 
 function fitTimeline() {
@@ -2547,7 +2907,10 @@ function syncStudioVideoToTimeline(globalTime, options = {}) {
       }
     }
     updateStudioClock(globalTime);
-    if (!options.skipAudioSync) syncStudioAudioToTimeline(globalTime, options);
+    if (!options.skipAudioSync) {
+      syncStudioAudioToTimeline(globalTime, options);
+      syncStudioMusicToTimeline(globalTime, options);
+    }
     if (options.autoplay && video.paused) playStudioVideo();
   };
   if (video.readyState > 0) setTime();
@@ -2561,6 +2924,26 @@ function combinedVoiceoverTrack() {
 
 function currentAudioItem() {
   return timelineItems().find((item) => item.type === "audio" && item.scene_id === selectedRow()?.scene.scene_id) || null;
+}
+
+function musicPreviewVolume(item = backgroundMusicItem()) {
+  if (!item || item.style?.enabled === false) return 0;
+  const hasVoice = Boolean(combinedVoiceoverTrack()?.audio_url || currentAudioItem()?.source_ref?.audio_url);
+  if (hasVoice && item.style?.ducking !== false) {
+    return clamp(Number(item.style?.ducking_volume ?? 0.08), 0, 1);
+  }
+  return clamp(Number(item.style?.volume ?? 0.16), 0, 1);
+}
+
+function musicLocalTime(globalTime, item = backgroundMusicItem()) {
+  if (!item) return 0;
+  const duration = Math.max(0.05, Number(item.source_ref?.duration_seconds || 0.05));
+  const trimStart = clamp(Number(item.source_ref?.trim_start_seconds || 0), 0, Math.max(0, duration - 0.05));
+  const trimEnd = clamp(Number(item.source_ref?.trim_end_seconds || duration), trimStart + 0.05, duration);
+  const trimDuration = Math.max(0.05, trimEnd - trimStart);
+  const local = Math.max(0, Number(globalTime || 0) - Number(item.start_seconds || 0));
+  if (item.style?.loop !== false) return trimStart + (local % trimDuration);
+  return trimStart + clamp(local, 0, trimDuration);
 }
 
 function syncStudioAudioToTimeline(globalTime, options = {}) {
@@ -2586,6 +2969,18 @@ function syncStudioAudioToTimeline(globalTime, options = {}) {
   syncAudioElementToTime(audio, targetTime, options);
 }
 
+function syncStudioMusicToTimeline(globalTime, options = {}) {
+  const music = document.getElementById("studio-music");
+  const item = backgroundMusicItem();
+  if (!music || !item?.source_ref?.audio_url || !music.src || item.style?.enabled === false) return;
+  if (globalTime < item.start_seconds || globalTime > item.end_seconds) {
+    music.pause();
+    return;
+  }
+  music.volume = musicPreviewVolume(item);
+  syncAudioElementToTime(music, musicLocalTime(globalTime, item), options);
+}
+
 function syncAudioElementToTime(audio, targetTime, options = {}) {
   const drift = Math.abs(Number(audio.currentTime || 0) - targetTime);
   const shouldSetTime = !options.tolerateDrift || drift > 0.28;
@@ -2605,15 +3000,22 @@ function syncAudioElementToTime(audio, targetTime, options = {}) {
 
 function playStudioAudio() {
   const audio = document.getElementById("studio-audio");
-  if (!audio?.src) return;
-  const promise = audio.play();
-  if (promise?.catch) promise.catch(() => {});
+  const music = document.getElementById("studio-music");
+  if (audio?.src) {
+    const promise = audio.play();
+    if (promise?.catch) promise.catch(() => {});
+  }
+  if (music?.src) {
+    const promise = music.play();
+    if (promise?.catch) promise.catch(() => {});
+  }
 }
 
 function pauseStudioMedia() {
   document.getElementById("studio-video")?.pause();
   document.getElementById("studio-next-video")?.pause();
   document.getElementById("studio-audio")?.pause();
+  document.getElementById("studio-music")?.pause();
   stopTimelineFrameTicker();
 }
 
@@ -2687,6 +3089,7 @@ function timelineClipLabel(item) {
   if (item?.type === "media") return trimStatusLabel(item);
   if (item?.type === "icon") return iconLabel(item.source_ref?.icon_id || "icon");
   if (item?.type === "overlay") return overlayLabel(overlayIdForItem(item));
+  if (item?.type === "music") return item.source_ref?.name || "Music";
   if (item?.type === "sfx") return item.source_ref?.label || sfxAsset(item.source_ref?.asset_id)?.name || "SFX";
   if (item?.type === "transition") return transitionLabel(transitionIdForItem(item));
   return itemLabel(item);
@@ -3135,10 +3538,11 @@ async function run(label, handler) {
 }
 
 async function api(url, options = {}) {
+  const hasFormData = Boolean(options.formData);
   const response = await fetch(url, {
     method: options.method || "GET",
-    headers: options.body ? { "Content-Type": "application/json" } : undefined,
-    body: options.body ? JSON.stringify(options.body) : undefined,
+    headers: !hasFormData && options.body ? { "Content-Type": "application/json" } : undefined,
+    body: hasFormData ? options.formData : (options.body ? JSON.stringify(options.body) : undefined),
   });
   const data = await response.json();
   if (!data.success) {
@@ -3189,11 +3593,17 @@ function hydrateProjectFields(updateInputs = true) {
   }
   setInputValue("tts-provider", state.preset.voiceover.provider || "free_tts");
   setInputValue("voice-id", state.preset.voiceover.voice_id || "en-US-AriaNeural");
+  setInputValue("voice-speed", state.preset.voiceover.voice_speed || 1);
+  updateVoiceSpeedLabel();
+  setInputChecked("preset-video-flip", Boolean(state.preset.video_defaults?.flip_horizontal));
+  setInputValue("preset-video-brightness", state.preset.video_defaults?.brightness ?? 1);
+  setInputValue("preset-video-contrast", state.preset.video_defaults?.contrast ?? 1.08);
+  setInputValue("preset-video-saturation", state.preset.video_defaults?.saturation ?? 1.08);
   setInputValue("preset-candidate-count", state.preset.scene_media.candidate_count || 4);
   setInputValue("preset-pinterest-count", state.preset.scene_media.pinterest_candidate_count || 4);
   setInputValue("douyin-min-count", state.preset.scene_media.candidate_count || 4);
   setInputValue("pinterest-min-count", state.preset.scene_media.pinterest_candidate_count || 4);
-  setInputValue("queries-per-scene", 2);
+  setInputValue("queries-per-scene", 1);
   setInputChecked("preset-translate", Boolean(state.preset.scene_media.translate_to_chinese));
   setInputChecked("translate-query", Boolean(state.preset.scene_media.translate_to_chinese));
 }
@@ -3201,6 +3611,12 @@ function hydrateProjectFields(updateInputs = true) {
 function updateDurationLabel() {
   const value = document.getElementById("start-duration").value;
   document.getElementById("start-duration-label").textContent = `${value} seconds`;
+}
+
+function updateVoiceSpeedLabel() {
+  const value = Number(inputValue("voice-speed", 1));
+  const label = document.getElementById("voice-speed-label");
+  if (label) label.textContent = `${value.toFixed(2)}x`;
 }
 
 function updateScriptMetrics() {
@@ -3260,6 +3676,7 @@ function studioToolForItem(item) {
     overlay: "overlay",
     transition: "transitions",
     icon: "icons",
+    music: "audio",
     sfx: "audio",
   }[item?.type] || null;
 }
@@ -3495,9 +3912,10 @@ function updateTimelinePlayhead(globalTime) {
 function updateStudioPlaybackButton() {
   const video = document.getElementById("studio-video");
   const audio = document.getElementById("studio-audio");
+  const music = document.getElementById("studio-music");
   const button = document.getElementById("studio-play");
   if (!button || !video) return;
-  button.textContent = state.timelinePlaying || !video.paused || (audio?.src && !audio.paused) ? "Pause" : "Play";
+  button.textContent = state.timelinePlaying || !video.paused || (audio?.src && !audio.paused) || (music?.src && !music.paused) ? "Pause" : "Play";
 }
 
 function ensureProject() {
@@ -3515,8 +3933,9 @@ function defaultPreset() {
     format: { aspect_ratio: "9:16", platform: "tiktok", target_duration_seconds: 45 },
     template: { template_id: "short_form_editor", template_category: "timeline_template", scene_pacing: "normal" },
     scene_media: { media_source: "multi_source", candidate_count: 4, pinterest_candidate_count: 4, translate_to_chinese: true },
-    voiceover: { provider: "free_tts", voice_id: "en-US-AriaNeural", language: "en" },
+    voiceover: { provider: "free_tts", voice_id: "en-US-AriaNeural", voice_speed: 1, language: "en" },
     captions: { enabled: true, style_id: "bold_outline", position: "bottom_safe", animation_id: "word_reveal" },
+    video_defaults: { flip_horizontal: false, brightness: 1, contrast: 1.08, saturation: 1.08 },
     extras: { transition_pack_id: "fade", overlay_pack_id: "caption_shadow", icon_pack_id: "none" },
   };
 }
@@ -3564,9 +3983,30 @@ function captionLabel(value) {
   }[value] || String(value || "").replaceAll("_", " ");
 }
 
+function voiceLabel(value) {
+  return {
+    "en-US-AriaNeural": "Aria",
+    "en-US-JennyNeural": "Jenny",
+    "en-US-GuyNeural": "Guy",
+    "en-US-RogerNeural": "Roger",
+    "en-US-AnaNeural": "Ana",
+    "en-GB-SoniaNeural": "Sonia",
+  }[value] || String(value || "Voice");
+}
+
+function videoDefaultsLabel(defaults = {}) {
+  const parts = [];
+  if (defaults.flip_horizontal) parts.push("flip");
+  if (Math.abs(Number(defaults.contrast ?? 1) - 1) > 0.01) parts.push(`contrast ${Number(defaults.contrast).toFixed(2)}`);
+  if (Math.abs(Number(defaults.saturation ?? 1) - 1) > 0.01) parts.push(`saturation ${Number(defaults.saturation).toFixed(2)}`);
+  if (Math.abs(Number(defaults.brightness ?? 1) - 1) > 0.01) parts.push(`brightness ${Number(defaults.brightness).toFixed(2)}`);
+  return parts.length ? parts.join(", ") : "natural";
+}
+
 function transitionLabel(value) {
   return {
     none: "None",
+    mix: "Mix motion",
     clean_cut: "Clean cut",
     fade: "Fade",
     dissolve: "Dissolve",

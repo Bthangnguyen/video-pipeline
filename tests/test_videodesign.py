@@ -1,4 +1,6 @@
 from pathlib import Path
+import math
+import wave
 
 from fastapi.testclient import TestClient
 
@@ -12,7 +14,7 @@ from app.pinterestsearch.service import pinterest_service
 from app.videodesign.audio import measure_audio_duration
 from app.videodesign.errors import SCRIPT_GENERATION_FAILED, VideoDesignError
 from app.videodesign.planner import split_script
-from app.videodesign.schemas import MaterialAsset, MediaCandidate, SplitSettings
+from app.videodesign.schemas import MaterialAsset, MediaCandidate, SmoothPreview, SplitSettings
 import app.videodesign.service as videodesign_service_module
 from app.videodesign.service import _download_source_url, videodesign_service
 
@@ -28,6 +30,20 @@ def _create_project(client: TestClient) -> str:
     )
     assert response.status_code == 200
     return response.json()["project"]["project_id"]
+
+
+def _write_test_wav(path: Path, duration_seconds: float = 0.5) -> None:
+    sample_rate = 16000
+    frame_count = max(1, int(sample_rate * duration_seconds))
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        frames = bytearray()
+        for index in range(frame_count):
+            sample = int(math.sin(2 * math.pi * 440 * (index / sample_rate)) * 8000)
+            frames.extend(sample.to_bytes(2, "little", signed=True))
+        wav.writeframes(bytes(frames))
 
 
 def test_videodesign_plans_dense_scenes():
@@ -343,8 +359,12 @@ def test_videodesign_sfx_catalog_suggest_and_apply(tmp_path):
     catalog_response = client.get("/api/videodesign/sfx/catalog")
     assert catalog_response.status_code == 200
     catalog = catalog_response.json()["items"]
-    assert any(item["asset_id"] == "sfx_whoosh_short" for item in catalog)
-    file_response = client.get("/api/videodesign/sfx/sfx_whoosh_short/file")
+    transition_presets = catalog_response.json()["transition_presets"]
+    assert any(item["asset_id"] == "mixkit_whoosh_fast_whoosh_transition" for item in catalog)
+    assert not any(item["asset_id"] == "sfx_whoosh_short" for item in catalog)
+    assert next(item for item in transition_presets if item["transition_id"] == "none")["enabled"] is False
+    assert next(item for item in transition_presets if item["transition_id"] == "slide_left")["volume"] > 0
+    file_response = client.get("/api/videodesign/sfx/mixkit_whoosh_fast_whoosh_transition/file")
     assert file_response.status_code == 200
     assert file_response.content
 
@@ -381,10 +401,11 @@ def test_videodesign_sfx_catalog_suggest_and_apply(tmp_path):
     assert suggestions
     assert any(item["event_type"] == "transition" for item in suggestions)
 
-    selected = [suggestions[0]["suggestion_id"]]
+    transition_suggestion = next(item for item in suggestions if item["event_type"] == "transition")
+    selected = [transition_suggestion["suggestion_id"]]
     apply_response = client.post(
         f"/api/videodesign/projects/{project_id}/sfx/apply",
-        json={"suggestion_ids": selected},
+        json={"suggestion_ids": selected, "volume_overrides": {selected[0]: 0.12}},
     )
 
     assert apply_response.status_code == 200
@@ -393,7 +414,69 @@ def test_videodesign_sfx_catalog_suggest_and_apply(tmp_path):
     sfx_items = [item for item in timeline["items"] if item["type"] == "sfx"]
     assert len(sfx_items) == 1
     assert sfx_items[0]["source_ref"]["asset_id"]
+    assert sfx_items[0]["style"]["volume"] == 0.12
+    assert sfx_items[0]["end_seconds"] - sfx_items[0]["start_seconds"] <= transition_suggestion["duration_hint_seconds"] + 0.01
     assert videodesign_service.store.get(project_id).smooth_preview.status in {"missing", "stale"}
+
+
+def test_videodesign_background_music_upload_patch_and_file(tmp_path):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    assert plan_response.status_code == 200
+
+    project = videodesign_service.store.get(project_id)
+    for index, scene in enumerate(project.scenes):
+        if index < 2:
+            scene.duration_seconds = 2
+            scene.approval_state = "downloaded"
+            asset_path = tmp_path / f"{scene.scene_id}.mp4"
+            asset_path.write_bytes(b"video")
+            asset = MaterialAsset(
+                asset_id=f"mat_music_{index}",
+                project_id=project_id,
+                scene_id=scene.scene_id,
+                candidate_id=f"cand_music_{index}",
+                local_path=str(asset_path),
+                duration=10,
+            )
+            project.material_assets.append(asset)
+            scene.material_asset_id = asset.asset_id
+        else:
+            scene.approval_state = "placeholder_allowed"
+    videodesign_service.store.put(project)
+
+    studio_response = client.post(f"/api/videodesign/projects/{project_id}/studio")
+    assert studio_response.status_code == 200
+
+    music_path = tmp_path / "music.wav"
+    _write_test_wav(music_path)
+    upload_response = client.post(
+        f"/api/videodesign/projects/{project_id}/music/upload",
+        files={"file": ("music.wav", music_path.read_bytes(), "audio/wav")},
+    )
+    assert upload_response.status_code == 200
+    timeline = upload_response.json()["timeline"]
+    music_items = [item for item in timeline["items"] if item["type"] == "music"]
+    assert len(music_items) == 1
+    assert music_items[0]["layer_id"] == "background_audio"
+    assert music_items[0]["style"]["ducking"] is True
+
+    file_response = client.get(music_items[0]["source_ref"]["audio_url"])
+    assert file_response.status_code == 200
+    assert file_response.content
+
+    patch_response = client.patch(
+        f"/api/videodesign/projects/{project_id}/timeline/items/{music_items[0]['item_id']}",
+        json={
+            "style": {**music_items[0]["style"], "volume": 0.22, "ducking_volume": 0.09},
+            "source_ref": {**music_items[0]["source_ref"], "trim_start_seconds": 0.1, "trim_end_seconds": 0.4},
+        },
+    )
+    assert patch_response.status_code == 200
+    assert patch_response.json()["item"]["style"]["volume"] == 0.22
+    assert patch_response.json()["item"]["source_ref"]["trim_start_seconds"] == 0.1
+    assert patch_response.json()["item"]["source_ref"]["trim_end_seconds"] == 0.4
 
 
 def test_videodesign_clear_tts_resets_audio_files_and_voiceover():
@@ -445,6 +528,44 @@ def test_videodesign_get_and_update_project():
     project = get_response.json()["project"]
     assert project["script"] == "A cleaner test script. It has two beats."
     assert project["style_brief"] == "clean social short"
+
+
+def test_videodesign_lists_saved_projects():
+    client = TestClient(app)
+    project_id = _create_project(client)
+
+    response = client.get("/api/videodesign/projects")
+
+    assert response.status_code == 200
+    projects = response.json()["projects"]
+    summary = next(item for item in projects if item["project_id"] == project_id)
+    assert summary["title"].startswith("Cats can recognize")
+    assert summary["stage"] == "script"
+    assert summary["scene_count"] == 0
+
+
+def test_videodesign_export_file_uses_smooth_preview(tmp_path):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    export_path = tmp_path / "timeline_preview.mp4"
+    export_path.write_bytes(b"export-video")
+
+    project = videodesign_service.store.get(project_id)
+    project.smooth_preview = SmoothPreview(
+        status="ready",
+        preview_url=f"/api/videodesign/projects/{project_id}/preview/file?v=test",
+        preview_path=str(export_path),
+        timeline_id="tln_test",
+        duration_seconds=3,
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    videodesign_service.store.put(project)
+
+    response = client.get(f"/api/videodesign/projects/{project_id}/export/file")
+
+    assert response.status_code == 200
+    assert response.content == b"export-video"
+    assert response.headers["content-type"].startswith("video/mp4")
 
 
 def test_videodesign_progress_endpoint_defaults_to_idle():
@@ -808,7 +929,7 @@ def test_videodesign_keyword_generation_endpoint_updates_scene(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["errors"] == []
-    assert body["scenes"][0]["matching_keywords"] == ["cat close up raw footage", "cat playing"]
+    assert body["scenes"][0]["matching_keywords"] == ["cat close up raw footage"]
 
 
 def test_videodesign_smart_keyword_failure_falls_back_during_search(monkeypatch):

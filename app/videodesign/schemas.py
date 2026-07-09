@@ -22,6 +22,7 @@ class TTSSettings(BaseModel):
     language: str = "en"
     provider: str = "free_tts"
     voice_id: str = "en-US-AriaNeural"
+    voice_speed: float = Field(default=1, ge=0.5, le=1.5)
 
 
 class CaptionChunk(BaseModel):
@@ -276,6 +277,7 @@ class TTSGenerateRequest(BaseModel):
     scene_ids: list[str] | None = None
     provider: str | None = None
     voice_id: str | None = None
+    voice_speed: float | None = Field(default=None, ge=0.5, le=1.5)
 
 
 class KeywordGenerateRequest(BaseModel):
@@ -357,3 +359,4 @@ class SFXSuggestRequest(BaseModel):
 
 class SFXApplyRequest(BaseModel):
     suggestion_ids: list[str] | None = None
+    volume_overrides: dict[str, float] = Field(default_factory=dict)

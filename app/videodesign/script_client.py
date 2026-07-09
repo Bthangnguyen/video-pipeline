@@ -16,11 +16,17 @@ class DeepSeekScriptClient:
         if not api_key:
             raise VideoDesignError(DEEPSEEK_API_KEY_MISSING, "DEEPSEEK_API_KEY is required to generate scripts.")
 
+        target_words = max(30, int(float(target_duration_seconds or 45) * 2.45))
+        scene_count = max(3, min(24, round(float(target_duration_seconds or 45) / 4.5)))
         prompt = (
             "Write a short-form video script as JSON only. "
             "Return keys: title, hook, script, scenes. "
             "Each scene must include voiceover_text, on_screen_text, visual_brief, search_keywords. "
-            f"Language: {language}. Target duration seconds: {target_duration_seconds}. Tone: {tone}. Idea: {idea}"
+            f"Language: {language}. Target duration seconds: {target_duration_seconds}. "
+            f"Keep the total voiceover around {target_words} words, within 15 percent. "
+            f"Use about {scene_count} scenes with natural sentence breaks. "
+            "Do not write a much longer generic script. "
+            f"Tone: {tone}. Idea: {idea}"
         )
         try:
             async with httpx.AsyncClient(timeout=45.0) as client:
@@ -53,10 +59,12 @@ class DeepSeekScriptClient:
             raise VideoDesignError(DEEPSEEK_API_KEY_MISSING, "DEEPSEEK_API_KEY is required for smart search keywords.")
 
         prompt = (
-            "Return JSON only with key search_keywords as a list of 2 or 3 short stock-video search queries. "
-            "Choose broad visual keywords, not exact voiceover fragments. "
-            "Prefer raw footage that is likely clean, vertical, natural, and has little or no embedded text. "
-            "Avoid niche abstract phrases, captions, quotes, and words like 'not', 'it's', or sentence fragments. "
+            "Return JSON only with key search_keywords as a list containing exactly 1 stock-video search query. "
+            "Choose the single broadest visual query that is likely to return raw footage, b-roll, or clean original video. "
+            "Prefer concrete visible subjects/actions/places over exact voiceover fragments. "
+            "The query should be 2 to 5 words, simple, searchable, and not too niche. "
+            "Avoid captions, quotes, emotions without visual subject, abstract phrases, and words like 'not', 'it's', or sentence fragments. "
+            "Good pattern: '<subject> <action/location> raw footage' only when raw footage fits naturally. "
             f"Language: {language}. "
             f"Voiceover: {voiceover_text}. "
             f"On-screen text: {on_screen_text}. "
@@ -81,7 +89,7 @@ class DeepSeekScriptClient:
         except Exception as exc:
             raise VideoDesignError(SCRIPT_GENERATION_FAILED, f"DeepSeek keyword generation failed: {exc}", retryable=True) from exc
         keywords = [str(item).strip() for item in data.get("search_keywords", []) if str(item).strip()]
-        return keywords[:3]
+        return keywords[:1]
 
 
 def _parse_json_object(content: str) -> dict:

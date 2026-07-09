@@ -29,6 +29,19 @@ class VideoDesignStore:
             raise VideoDesignError(PROJECT_NOT_FOUND, "Video design project does not exist.")
         return project
 
+    def list(self) -> list[VideoDesignProject]:
+        projects = dict(self._projects)
+        if settings.storage_dir.exists():
+            for path in settings.storage_dir.glob("*/project.json"):
+                project_id = path.parent.name
+                try:
+                    project = self._load(project_id)
+                except Exception:
+                    continue
+                if project:
+                    projects[project.project_id] = project
+        return list(projects.values())
+
     def _load(self, project_id: str) -> VideoDesignProject | None:
         path = self._project_path(project_id)
         if not path.exists():

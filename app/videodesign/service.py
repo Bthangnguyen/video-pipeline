@@ -1,10 +1,12 @@
 import asyncio
+import json
 import math
 import re
 import shutil
 import wave
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -62,6 +64,7 @@ from app.videodesign.schemas import (
     SmoothPreview,
     TTSGenerateRequest,
     TTSMeta,
+    TTSSettings,
     TimelineDraft,
     TimelineItemCreateRequest,
     TimelineItem,
@@ -126,7 +129,112 @@ KEYWORD_STOPWORDS = {
 
 TIMELINE_MIN_ITEM_DURATION = 0.25
 SFX_SAMPLE_RATE = 44100
-SFX_CATALOG_DEFS = [
+STATIC_SFX_ROOT = Path(__file__).resolve().parents[1] / "static" / "sfx" / "mixkit"
+STATIC_SFX_RECOMMENDED_EVENTS = {
+    "pop": ["caption_word", "text_overlay"],
+    "click": ["icon", "text_overlay"],
+    "whoosh": ["transition", "icon"],
+    "impact": ["hook", "transition", "caption_word"],
+    "ding": ["icon", "caption_word"],
+    "glitch": ["transition", "text_overlay"],
+}
+STATIC_SFX_DEFAULT_VOLUME = {
+    "pop": 0.28,
+    "click": 0.22,
+    "whoosh": 0.32,
+    "impact": 0.34,
+    "ding": 0.24,
+    "glitch": 0.22,
+}
+SFX_TRANSITION_PRESETS = {
+    "none": {"enabled": False, "category": "none", "volume": 0.0, "duration_seconds": 0.0},
+    "clean_cut": {"enabled": False, "category": "none", "volume": 0.0, "duration_seconds": 0.0},
+    "fade": {
+        "enabled": True,
+        "category": "whoosh",
+        "asset_ids": ["mixkit_whoosh_air_woosh"],
+        "volume": 0.12,
+        "duration_seconds": 0.45,
+    },
+    "dissolve": {
+        "enabled": True,
+        "category": "whoosh",
+        "asset_ids": ["mixkit_whoosh_air_woosh"],
+        "volume": 0.1,
+        "duration_seconds": 0.45,
+    },
+    "slide_left": {
+        "enabled": True,
+        "category": "whoosh",
+        "asset_ids": ["mixkit_whoosh_fast_whoosh_transition"],
+        "volume": 0.26,
+        "duration_seconds": 0.38,
+    },
+    "slide_right": {
+        "enabled": True,
+        "category": "whoosh",
+        "asset_ids": ["mixkit_whoosh_fast_whoosh_transition"],
+        "volume": 0.26,
+        "duration_seconds": 0.38,
+    },
+    "slide_up": {
+        "enabled": True,
+        "category": "whoosh",
+        "asset_ids": ["mixkit_whoosh_fast_rocket_whoosh"],
+        "volume": 0.24,
+        "duration_seconds": 0.4,
+    },
+    "push_slide": {
+        "enabled": True,
+        "category": "whoosh",
+        "asset_ids": ["mixkit_whoosh_cinematic_whoosh_fast_transition"],
+        "volume": 0.28,
+        "duration_seconds": 0.42,
+    },
+    "whip_pan": {
+        "enabled": True,
+        "category": "whoosh",
+        "asset_ids": ["mixkit_whoosh_cinematic_whoosh_fast_transition"],
+        "volume": 0.34,
+        "duration_seconds": 0.32,
+    },
+    "zoom_in": {
+        "enabled": True,
+        "category": "impact",
+        "asset_ids": ["mixkit_impact_quick_zoom_impact"],
+        "volume": 0.25,
+        "duration_seconds": 0.32,
+    },
+    "zoom_out": {
+        "enabled": True,
+        "category": "impact",
+        "asset_ids": ["mixkit_impact_quick_zoom_impact"],
+        "volume": 0.23,
+        "duration_seconds": 0.32,
+    },
+    "flash_cut": {
+        "enabled": True,
+        "category": "glitch",
+        "asset_ids": ["mixkit_glitch_small_electric_glitch"],
+        "volume": 0.22,
+        "duration_seconds": 0.24,
+    },
+    "speed_zoom": {
+        "enabled": True,
+        "category": "impact",
+        "asset_ids": ["mixkit_impact_cinematic_whoosh_deep_impact"],
+        "volume": 0.3,
+        "duration_seconds": 0.35,
+    },
+    "fast_swipes": {
+        "enabled": True,
+        "category": "whoosh",
+        "asset_ids": ["mixkit_whoosh_cinematic_whoosh_fast_transition"],
+        "volume": 0.3,
+        "duration_seconds": 0.35,
+    },
+}
+LEGACY_SFX_DEFS = [
     {
         "asset_id": "sfx_pop_soft",
         "name": "Soft Pop",
@@ -209,6 +317,10 @@ class VideoDesignService:
         )
         self.store.put(project)
         return {"success": True, "project": project.model_dump()}
+
+    def list_projects(self) -> dict:
+        projects = sorted(self.store.list(), key=_project_sort_value, reverse=True)
+        return {"success": True, "projects": [_project_summary(project) for project in projects]}
 
     def get_project(self, project_id: str) -> dict:
         project = self.store.get(project_id)
@@ -327,13 +439,14 @@ class VideoDesignService:
         project = self.store.get(project_id)
         provider = request.provider or project.tts_settings.provider
         voice_id = request.voice_id or project.tts_settings.voice_id
+        voice_speed = float(request.voice_speed or project.tts_settings.voice_speed or 1)
         if not request.scene_ids:
-            return await self._generate_global_tts(project, provider, voice_id)
+            return await self._generate_global_tts(project, provider, voice_id, voice_speed)
         scenes = _selected_scenes(project, request.scene_ids)
         for scene in scenes:
             text = scene.tts_text or scene.voiceover_text
             _delete_project_file(project, scene.tts.audio_path)
-            result = await self.tts_client.generate(text, project.project_id, scene.scene_id, provider, voice_id)
+            result = await self.tts_client.generate(text, project.project_id, scene.scene_id, provider, voice_id, voice_speed)
             previous_duration = scene.duration_seconds
             scene.duration_seconds = result.duration_seconds
             if scene.clip and previous_duration and abs(scene.clip.duration_seconds - result.duration_seconds) > 0.05:
@@ -347,12 +460,13 @@ class VideoDesignService:
                 duration_seconds=result.duration_seconds,
                 sync_state="synced",
             )
+        project.tts_settings = TTSSettings(language=project.language, provider=provider, voice_id=voice_id, voice_speed=voice_speed)
         _delete_project_file(project, project.voiceover_track.audio_path)
         project.voiceover_track = VoiceoverTrack()
         self.store.put(project)
         return {"success": True, "project": project.model_dump(), "scenes": [scene.model_dump() for scene in scenes]}
 
-    async def _generate_global_tts(self, project: VideoDesignProject, provider: str, voice_id: str) -> dict:
+    async def _generate_global_tts(self, project: VideoDesignProject, provider: str, voice_id: str, voice_speed: float) -> dict:
         scenes = _renderable_scenes(project)
         if not scenes:
             raise VideoDesignError(SCENE_NOT_READY, "Project has no scenes for TTS.")
@@ -366,7 +480,7 @@ class VideoDesignService:
         if not full_text:
             raise VideoDesignError(SCRIPT_REQUIRED, "No scene voiceover text is available for TTS.")
 
-        result = await self.tts_client.generate(full_text, project.project_id, "global_voiceover", provider, voice_id)
+        result = await self.tts_client.generate(full_text, project.project_id, "global_voiceover", provider, voice_id, voice_speed)
         offsets = _assign_global_tts_offsets(scenes, result.duration_seconds)
         for scene, offset in zip(scenes, offsets):
             duration = round(max(0.05, offset.end_seconds - offset.start_seconds), 3)
@@ -389,6 +503,7 @@ class VideoDesignService:
             duration_seconds=round(result.duration_seconds, 3),
             scene_offsets=offsets,
         )
+        project.tts_settings = TTSSettings(language=project.language, provider=provider, voice_id=voice_id, voice_speed=voice_speed)
         project.timeline = None
         _reset_smooth_preview(project)
         self.store.put(project)
@@ -494,7 +609,7 @@ class VideoDesignService:
         total = len(scenes)
         self._set_progress(project, "keyword_generation", "Preparing search keywords.", 0, total)
         for index, scene in enumerate(scenes, start=1):
-            keywords, error = await self._smart_keywords_or_fallback(project, scene, 3)
+            keywords, error = await self._smart_keywords_or_fallback(project, scene, 1)
             scene.matching_keywords = keywords
             if error:
                 errors.append({"scene_id": scene.scene_id, "error": error})
@@ -881,8 +996,8 @@ class VideoDesignService:
         request: MaterialsSearchRequest,
     ) -> list[str]:
         if request.use_smart_keywords:
-            keywords, _error = await self._smart_keywords_or_fallback(project, scene, request.queries_per_scene)
-            return keywords[: request.queries_per_scene]
+            keywords, _error = await self._smart_keywords_or_fallback(project, scene, 1)
+            return keywords[:1]
         keywords = _normalize_keywords(scene.matching_keywords, request.queries_per_scene)
         if keywords:
             return keywords
@@ -952,6 +1067,7 @@ class VideoDesignService:
                 end = round(current + duration, 2)
             if not scene.clip or scene.clip.material_asset_id != asset.asset_id:
                 scene.clip = _make_scene_clip(scene, asset, duration)
+            _apply_video_defaults_to_clip(scene.clip, project.design_preset)
             items.extend(_timeline_items_for_scene(project.project_id, scene, asset, start, end, project.design_preset))
             if index < len(renderable_scenes) - 1:
                 items.append(_transition_item_for_scene(scene, end, project.design_preset))
@@ -1019,6 +1135,28 @@ class VideoDesignService:
         self.store.put(project)
         return {"success": True, "preview": project.smooth_preview.model_dump()}
 
+    async def render_export(self, project_id: str) -> dict:
+        result = await self.render_smooth_preview(project_id)
+        return {
+            "success": True,
+            "preview": result["preview"],
+            "export_url": _export_url(project_id),
+        }
+
+    def export_file_path(self, project_id: str) -> Path:
+        project = self.store.get(project_id)
+        if project.smooth_preview.status != "ready" or not project.smooth_preview.preview_path:
+            raise VideoDesignError(PREVIEW_RENDER_FAILED, "Render the export before downloading the MP4.", retryable=True)
+        path = Path(project.smooth_preview.preview_path)
+        if not path.exists():
+            raise VideoDesignError(PREVIEW_RENDER_FAILED, "Rendered export file does not exist.", retryable=True)
+        return path
+
+    def export_filename(self, project_id: str) -> str:
+        project = self.store.get(project_id)
+        title = _project_title(project)
+        return f"{_safe_filename(title)}.mp4"
+
     def smooth_preview_file_path(self, project_id: str) -> Path:
         project = self.store.get(project_id)
         if project.smooth_preview.status not in {"ready", "stale"} or not project.smooth_preview.preview_path:
@@ -1037,6 +1175,79 @@ class VideoDesignService:
         project = self.store.get(project_id)
         asset = _asset(project, asset_id)
         return asset.proxy_path or asset.local_path
+
+    def upload_background_music(self, project_id: str, filename: str, content: bytes, content_type: str = "") -> dict:
+        project = self.store.get(project_id)
+        if not project.timeline:
+            raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
+        if not content:
+            raise VideoDesignError(INVALID_PROJECT_INPUT, "Music file is empty.")
+        suffix = Path(filename or "").suffix.lower()
+        allowed_suffixes = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+        if suffix not in allowed_suffixes and not str(content_type or "").startswith("audio/"):
+            raise VideoDesignError(INVALID_PROJECT_INPUT, "Upload an audio file for background music.")
+        if suffix not in allowed_suffixes:
+            suffix = ".mp3"
+        music_dir = settings.storage_dir / project.project_id / "music"
+        music_dir.mkdir(parents=True, exist_ok=True)
+        item_id = f"itm_{uuid.uuid4().hex}"
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", Path(filename or "background-music").stem).strip("-") or "background-music"
+        output_path = music_dir / f"{item_id}-{safe_name}{suffix}"
+        output_path.write_bytes(content)
+        try:
+            duration_seconds = measure_audio_duration(output_path)
+        except Exception as exc:
+            _delete_project_file(project, str(output_path))
+            raise VideoDesignError(INVALID_PROJECT_INPUT, f"Could not read uploaded music: {exc}") from exc
+
+        for old_item in [item for item in project.timeline.items if item.type == "music"]:
+            _delete_project_file(project, str(old_item.source_ref.get("local_path") or ""))
+        project.timeline.items = [item for item in project.timeline.items if item.type != "music"]
+        scene_id = project.timeline.scenes[0] if project.timeline.scenes else project.scenes[0].scene_id
+        duration = max(0.25, float(project.timeline.duration_seconds or duration_seconds or 0.25))
+        item = TimelineItem(
+            item_id=item_id,
+            layer_id="background_audio",
+            scene_id=scene_id,
+            type="music",
+            start_seconds=0,
+            end_seconds=round(duration, 3),
+            source_ref={
+                "name": Path(filename or "Background music").name,
+                "local_path": str(output_path),
+                "audio_url": f"/api/videodesign/projects/{project.project_id}/music/{item_id}/file",
+                "duration_seconds": round(float(duration_seconds or 0), 3),
+                "trim_start_seconds": 0,
+                "trim_end_seconds": round(float(duration_seconds or 0), 3),
+            },
+            style={
+                "enabled": True,
+                "volume": 0.16,
+                "ducking": True,
+                "ducking_volume": 0.08,
+                "fade_in_seconds": 1.0,
+                "fade_out_seconds": 1.0,
+                "loop": True,
+            },
+        )
+        if "background_audio" not in project.timeline.layers:
+            project.timeline.layers.append("background_audio")
+        project.timeline.items.append(item)
+        _mark_preview_stale(project)
+        self.store.put(project)
+        return {"success": True, "item": item.model_dump(), "timeline": project.timeline.model_dump()}
+
+    def background_music_file_path(self, project_id: str, item_id: str) -> Path:
+        project = self.store.get(project_id)
+        if not project.timeline:
+            raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
+        item = next((entry for entry in project.timeline.items if entry.item_id == item_id and entry.type == "music"), None)
+        if not item:
+            raise VideoDesignError(SCENE_NOT_FOUND, "Background music item does not exist.")
+        path = Path(str(item.source_ref.get("local_path") or ""))
+        if not path.exists():
+            raise VideoDesignError(AUDIO_NOT_FOUND, "Background music file does not exist.", retryable=True)
+        return path
 
     def create_timeline_item(self, project_id: str, request: TimelineItemCreateRequest) -> dict:
         project = self.store.get(project_id)
@@ -1098,9 +1309,12 @@ class VideoDesignService:
         if not project.timeline:
             raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
         before = len(project.timeline.items)
+        deleted_item = next((item for item in project.timeline.items if item.item_id == item_id), None)
         project.timeline.items = [item for item in project.timeline.items if item.item_id != item_id]
         if len(project.timeline.items) == before:
             raise VideoDesignError(SCENE_NOT_FOUND, "Timeline item does not exist.")
+        if deleted_item and deleted_item.type == "music":
+            _delete_project_file(project, str(deleted_item.source_ref.get("local_path") or ""))
         _mark_preview_stale(project)
         self.store.put(project)
         return {"success": True, "timeline": project.timeline.model_dump()}
@@ -1138,7 +1352,11 @@ class VideoDesignService:
 
     def sfx_catalog(self) -> dict:
         assets = _sfx_catalog_assets()
-        return {"success": True, "items": [asset.model_dump() for asset in assets]}
+        return {
+            "success": True,
+            "items": [asset.model_dump() for asset in assets],
+            "transition_presets": _sfx_transition_presets_for_ui(),
+        }
 
     def sfx_file_path(self, asset_id: str) -> Path:
         asset = _sfx_asset(asset_id)
@@ -1180,13 +1398,19 @@ class VideoDesignService:
         }
         applied = []
         for suggestion in suggestions:
+            if suggestion.suggestion_id in request.volume_overrides:
+                suggestion.volume = _clamp_sfx_volume(request.volume_overrides[suggestion.suggestion_id])
             if suggestion.event_id in existing_event_ids:
                 suggestion.status = "applied"
                 continue
             asset = _sfx_asset(suggestion.asset_id)
             start = max(0.0, float(suggestion.time_seconds))
+            sfx_duration = max(
+                0.05,
+                min(float(asset.duration_seconds or 0.25), float(suggestion.duration_hint_seconds or asset.duration_seconds or 0.25)),
+            )
             end = min(
-                max(start + 0.05, start + float(asset.duration_seconds or suggestion.duration_hint_seconds or 0.25)),
+                max(start + 0.05, start + sfx_duration),
                 max(start + 0.05, float(project.timeline.duration_seconds or start + 0.25)),
             )
             item = TimelineItem(
@@ -1319,9 +1543,9 @@ def _fallback_keywords_for_scene(project: VideoDesignProject, scene: ScenePlan, 
     for text in (scene.visual_brief, scene.on_screen_text, scene.voiceover_text, project.idea, project.script):
         phrase = _keyword_phrase(text)
         if phrase:
-            _append_keyword(candidates, phrase)
             if "video" not in phrase and "footage" not in phrase:
                 _append_keyword(candidates, f"{phrase} raw footage")
+            _append_keyword(candidates, phrase)
         if len(candidates) >= max(1, limit):
             break
     return candidates[: max(1, limit)] or ["raw vertical footage"]
@@ -1508,11 +1732,79 @@ def _sfx_catalog_dir() -> Path:
 
 
 def _sfx_catalog_assets() -> list[SFXAsset]:
-    return [_sfx_asset(definition["asset_id"]) for definition in SFX_CATALOG_DEFS]
+    return list(_static_sfx_catalog_assets())
+
+
+def _sfx_transition_presets_for_ui() -> list[dict]:
+    items = []
+    for transition_id, preset in SFX_TRANSITION_PRESETS.items():
+        asset_id = _sfx_asset_for_transition(transition_id)
+        asset = _sfx_asset(asset_id) if asset_id else None
+        items.append(
+            {
+                "transition_id": transition_id,
+                "enabled": bool(preset.get("enabled")),
+                "category": preset.get("category", "none"),
+                "asset_id": asset.asset_id if asset else "",
+                "asset_name": asset.name if asset else "No SFX",
+                "volume": float(preset.get("volume", 0)),
+                "duration_seconds": float(preset.get("duration_seconds", 0)),
+            }
+        )
+    return items
 
 
 def _sfx_asset(asset_id: str) -> SFXAsset:
-    definition = next((item for item in SFX_CATALOG_DEFS if item["asset_id"] == asset_id), None)
+    static_asset = next((asset for asset in _static_sfx_catalog_assets() if asset.asset_id == asset_id), None)
+    if static_asset:
+        return static_asset
+    return _generated_sfx_asset(asset_id)
+
+
+@lru_cache(maxsize=1)
+def _static_sfx_catalog_assets() -> tuple[SFXAsset, ...]:
+    catalog_path = STATIC_SFX_ROOT / "catalog.json"
+    if not catalog_path.exists():
+        return tuple()
+    try:
+        items = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return tuple()
+    assets: list[SFXAsset] = []
+    for item in items:
+        filename = str(item.get("filename") or "").strip()
+        asset_id = str(item.get("asset_id") or "").strip()
+        if not filename or not asset_id:
+            continue
+        local_path = STATIC_SFX_ROOT / filename
+        if not local_path.exists():
+            continue
+        category = str(item.get("category") or "sfx").strip()
+        duration = _safe_audio_duration(local_path)
+        assets.append(
+            SFXAsset(
+                asset_id=asset_id,
+                name=str(item.get("name") or asset_id),
+                category=category,
+                audio_url=str(item.get("audio_url") or f"/static/sfx/mixkit/{filename}"),
+                local_path=str(local_path),
+                duration_seconds=duration,
+                default_volume=float(STATIC_SFX_DEFAULT_VOLUME.get(category, 0.28)),
+                recommended_events=list(STATIC_SFX_RECOMMENDED_EVENTS.get(category, ["transition", "caption_word"])),
+            )
+        )
+    return tuple(assets)
+
+
+def _safe_audio_duration(path: Path) -> float:
+    try:
+        return max(0.05, round(measure_audio_duration(path), 3))
+    except Exception:
+        return 0.35
+
+
+def _generated_sfx_asset(asset_id: str) -> SFXAsset:
+    definition = next((item for item in LEGACY_SFX_DEFS if item["asset_id"] == asset_id), None)
     if not definition:
         raise VideoDesignError(SCENE_NOT_FOUND, "SFX asset does not exist.")
     local_path = _ensure_sfx_file(definition)
@@ -1568,24 +1860,35 @@ def _suggest_sfx_for_project(project: VideoDesignProject, request: SFXSuggestReq
     )
     suggestions: list[SFXSuggestion] = []
     if request.include_hook and media_items:
-        suggestions.append(
-            _make_sfx_suggestion(
-                project,
-                event_id="evt_hook_start",
-                scene_id=media_items[0].scene_id,
-                event_type="hook",
-                time_seconds=0,
-                asset_id="sfx_impact_soft",
-                label="Opening hook impact",
-                reason="Adds a subtle accent at the start of the video.",
-                priority=0.95,
+        asset_id = _sfx_asset_for_category("impact")
+        if asset_id:
+            suggestions.append(
+                _make_sfx_suggestion(
+                    project,
+                    event_id="evt_hook_start",
+                    scene_id=media_items[0].scene_id,
+                    event_type="hook",
+                    time_seconds=0,
+                    asset_id=asset_id,
+                    label="Opening hook impact",
+                    reason="Adds a subtle accent at the start of the video.",
+                    priority=0.95,
+                )
             )
-        )
     if request.include_transitions:
         for transition in sorted([item for item in project.timeline.items if item.type == "transition"], key=lambda item: item.start_seconds):
             transition_id = str(transition.style.get("transition_id") or transition.source_ref.get("transition_id") or "fade")
+            preset = _sfx_transition_preset(transition_id)
+            if not preset.get("enabled"):
+                continue
             transition_label = transition_id.replace("_", " ")
             asset_id = _sfx_asset_for_transition(str(transition_id))
+            if not asset_id:
+                continue
+            duration_hint = min(
+                float(preset.get("duration_seconds", 0.35) or 0.35),
+                max(0.08, float(transition.end_seconds - transition.start_seconds) + 0.1),
+            )
             suggestions.append(
                 _make_sfx_suggestion(
                     project,
@@ -1597,11 +1900,16 @@ def _suggest_sfx_for_project(project: VideoDesignProject, request: SFXSuggestReq
                     label=f"{transition_label} transition",
                     reason=f"Transition uses {transition_label}, so a short accent can make the cut feel intentional.",
                     priority=0.9,
+                    volume=float(preset.get("volume", 0.25)),
+                    duration_hint_seconds=duration_hint,
                 )
             )
     if request.include_icons:
         for icon in sorted([item for item in project.timeline.items if item.type == "icon"], key=lambda item: item.start_seconds):
             icon_id = str(icon.source_ref.get("icon_id") or "icon")
+            asset_id = _sfx_asset_for_icon(icon_id)
+            if not asset_id:
+                continue
             suggestions.append(
                 _make_sfx_suggestion(
                     project,
@@ -1609,7 +1917,7 @@ def _suggest_sfx_for_project(project: VideoDesignProject, request: SFXSuggestReq
                     scene_id=icon.scene_id,
                     event_type="icon",
                     time_seconds=icon.start_seconds,
-                    asset_id=_sfx_asset_for_icon(icon_id),
+                    asset_id=asset_id,
                     label=f"{icon_id.replace('_', ' ')} icon",
                     reason="Icon appears on screen and can use a small emphasis sound.",
                     priority=0.72,
@@ -1620,6 +1928,9 @@ def _suggest_sfx_for_project(project: VideoDesignProject, request: SFXSuggestReq
             text = str(text_item.source_ref.get("text") or "").strip()
             if not text:
                 continue
+            asset_id = _sfx_asset_for_category("pop")
+            if not asset_id:
+                continue
             suggestions.append(
                 _make_sfx_suggestion(
                     project,
@@ -1627,7 +1938,7 @@ def _suggest_sfx_for_project(project: VideoDesignProject, request: SFXSuggestReq
                     scene_id=text_item.scene_id,
                     event_type="text_overlay",
                     time_seconds=text_item.start_seconds,
-                    asset_id="sfx_pop_soft",
+                    asset_id=asset_id,
                     label="Text pop",
                     reason="Text overlay starts here.",
                     priority=0.62,
@@ -1653,6 +1964,8 @@ def _make_sfx_suggestion(
     label: str,
     reason: str,
     priority: float,
+    volume: float | None = None,
+    duration_hint_seconds: float | None = None,
 ) -> SFXSuggestion:
     asset = _sfx_asset(asset_id)
     return SFXSuggestion(
@@ -1662,11 +1975,11 @@ def _make_sfx_suggestion(
         scene_id=scene_id,
         event_type=event_type,
         time_seconds=round(max(0.0, float(time_seconds)), 3),
-        duration_hint_seconds=asset.duration_seconds,
+        duration_hint_seconds=round(max(0.05, float(duration_hint_seconds or asset.duration_seconds)), 3),
         label=label,
         reason=reason,
         asset_id=asset.asset_id,
-        volume=asset.default_volume,
+        volume=_clamp_sfx_volume(volume if volume is not None else asset.default_volume),
     )
 
 
@@ -1681,7 +1994,9 @@ def _caption_word_sfx_suggestions(project: VideoDesignProject, scene: ScenePlan,
     for index in indexes[:2]:
         word = words[index]
         local = duration * (index / max(1, len(words)))
-        asset_id = "sfx_ding" if any(char.isdigit() for char in word) else "sfx_pop_soft"
+        asset_id = _sfx_asset_for_category("ding" if any(char.isdigit() for char in word) else "pop")
+        if not asset_id:
+            continue
         suggestions.append(
             _make_sfx_suggestion(
                 project,
@@ -1736,19 +2051,49 @@ def _dedupe_sfx_suggestions(suggestions: list[SFXSuggestion], limit: int) -> lis
 
 
 def _sfx_asset_for_transition(transition_id: str) -> str:
-    if transition_id in {"slide_left", "slide_right", "slide_up", "whip_pan", "push_slide"}:
-        return "sfx_whoosh_short"
-    if transition_id in {"zoom_in", "zoom_out", "flash_cut", "speed_zoom"}:
-        return "sfx_impact_soft"
-    return "sfx_whoosh_short"
+    preset = _sfx_transition_preset(transition_id)
+    if not preset.get("enabled"):
+        return ""
+    return _sfx_asset_from_preset(preset)
+
+
+def _sfx_transition_preset(transition_id: str) -> dict:
+    return SFX_TRANSITION_PRESETS.get(str(transition_id or "fade"), SFX_TRANSITION_PRESETS["fade"])
+
+
+def _sfx_asset_from_preset(preset: dict) -> str:
+    for asset_id in preset.get("asset_ids", []):
+        if _static_sfx_asset_exists(str(asset_id)):
+            return str(asset_id)
+    category = str(preset.get("category") or "")
+    if category and category != "none":
+        return _sfx_asset_for_category(category)
+    return ""
+
+
+def _static_sfx_asset_exists(asset_id: str) -> bool:
+    return any(item.asset_id == asset_id for item in _static_sfx_catalog_assets())
 
 
 def _sfx_asset_for_icon(icon_id: str) -> str:
     if icon_id in {"check", "starburst"}:
-        return "sfx_ding"
+        return _sfx_asset_for_category("ding")
     if icon_id in {"arrow_right", "pointer"}:
-        return "sfx_whoosh_short"
-    return "sfx_click_soft"
+        return _sfx_asset_for_category("whoosh")
+    return _sfx_asset_for_category("click")
+
+
+def _sfx_asset_for_category(category: str) -> str:
+    asset = next((item for item in _static_sfx_catalog_assets() if item.category == category), None)
+    return asset.asset_id if asset else ""
+
+
+def _clamp_sfx_volume(value: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = 0.35
+    return round(max(0.0, min(1.0, number)), 3)
 
 
 def _mark_preview_stale(project: VideoDesignProject) -> None:
@@ -1768,9 +2113,70 @@ def _reset_smooth_preview(project: VideoDesignProject) -> None:
     project.smooth_preview = SmoothPreview()
 
 
+def _project_sort_value(project: VideoDesignProject) -> str:
+    return project.smooth_preview.updated_at or project.created_at or project.project_id
+
+
+def _project_title(project: VideoDesignProject) -> str:
+    text = (project.idea or project.script or project.project_id).strip()
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), project.project_id)
+    return first_line[:90]
+
+
+def _project_stage(project: VideoDesignProject) -> str:
+    if project.smooth_preview.status == "ready" and project.smooth_preview.preview_path:
+        return "export_ready"
+    if project.timeline:
+        return "studio"
+    if any(scene.material_asset_id for scene in project.scenes):
+        return "materials_downloaded"
+    if project.candidates:
+        return "review_materials"
+    if project.scenes:
+        return "plan"
+    if project.script.strip():
+        return "script"
+    return "idea"
+
+
+def _project_summary(project: VideoDesignProject) -> dict:
+    approved_count = sum(1 for scene in project.scenes if scene.selected_candidate_id)
+    downloaded_count = sum(1 for scene in project.scenes if scene.material_asset_id)
+    export_ready = bool(
+        project.smooth_preview.status == "ready"
+        and project.smooth_preview.preview_path
+        and Path(project.smooth_preview.preview_path).exists()
+    )
+    return {
+        "project_id": project.project_id,
+        "title": _project_title(project),
+        "stage": _project_stage(project),
+        "created_at": project.created_at,
+        "target_duration_seconds": project.target_duration_seconds,
+        "aspect_ratio": project.aspect_ratio,
+        "scene_count": len(project.scenes),
+        "candidate_count": len(project.candidates),
+        "approved_count": approved_count,
+        "downloaded_count": downloaded_count,
+        "has_timeline": bool(project.timeline),
+        "timeline_duration_seconds": project.timeline.duration_seconds if project.timeline else 0,
+        "preview_status": project.smooth_preview.status,
+        "export_ready": export_ready,
+    }
+
+
 def _smooth_preview_url(project_id: str, updated_at: str) -> str:
     cache_key = re.sub(r"[^0-9A-Za-z]", "", updated_at) or uuid.uuid4().hex
     return f"/api/videodesign/projects/{project_id}/preview/file?v={cache_key}"
+
+
+def _export_url(project_id: str) -> str:
+    return f"/api/videodesign/projects/{project_id}/export/file"
+
+
+def _safe_filename(value: str) -> str:
+    filename = re.sub(r"[^0-9A-Za-z._-]+", "-", value.strip()).strip(".-")
+    return filename[:80] or "videodesign-export"
 
 
 async def _render_smooth_preview_file(project: VideoDesignProject) -> Path:
@@ -1839,6 +2245,18 @@ async def _render_smooth_preview_file(project: VideoDesignProject) -> Path:
     if project.voiceover_track.audio_path and Path(project.voiceover_track.audio_path).exists():
         audio_input_index = len(media_items)
         command.extend(["-i", str(Path(project.voiceover_track.audio_path))])
+    music_inputs: list[tuple[TimelineItem, int, Path]] = []
+    for item in sorted([entry for entry in project.timeline.items if entry.type == "music"], key=lambda entry: entry.start_seconds):
+        if item.style.get("enabled") is False:
+            continue
+        path = Path(str(item.source_ref.get("local_path") or ""))
+        if not path.exists():
+            continue
+        input_index = len(media_items) + (1 if audio_input_index is not None else 0) + len(music_inputs)
+        if item.style.get("loop", True):
+            command.extend(["-stream_loop", "-1"])
+        command.extend(["-i", str(path)])
+        music_inputs.append((item, input_index, path))
     sfx_inputs: list[tuple[TimelineItem, int, SFXAsset]] = []
     for item in sorted([entry for entry in project.timeline.items if entry.type == "sfx"], key=lambda entry: entry.start_seconds):
         if item.style.get("enabled") is False:
@@ -1853,7 +2271,7 @@ async def _render_smooth_preview_file(project: VideoDesignProject) -> Path:
         path = Path(asset.local_path)
         if not path.exists():
             continue
-        input_index = len(media_items) + (1 if audio_input_index is not None else 0) + len(sfx_inputs)
+        input_index = len(media_items) + (1 if audio_input_index is not None else 0) + len(music_inputs) + len(sfx_inputs)
         command.extend(["-i", str(path)])
         sfx_inputs.append((item, input_index, asset))
 
@@ -1880,7 +2298,7 @@ async def _render_smooth_preview_file(project: VideoDesignProject) -> Path:
         chain = output_label
 
     duration = max(TIMELINE_MIN_ITEM_DURATION, float(project.timeline.duration_seconds or media_items[-1].end_seconds))
-    audio_label = _append_audio_mix_filters(filter_parts, audio_input_index, sfx_inputs, duration)
+    audio_label = _append_audio_mix_filters(filter_parts, audio_input_index, music_inputs, sfx_inputs, duration)
     command.extend(["-filter_complex", ";".join(filter_parts), "-map", f"[{chain}]"])
     if audio_label:
         command.extend(["-map", f"[{audio_label}]", "-c:a", "aac", "-b:a", "160k"])
@@ -1983,9 +2401,19 @@ def _media_render_filter(index: int, item: TimelineItem, duration: float, width:
     return f"[{index}:v]{','.join(filters)}[v{index}]"
 
 
+def _music_trim_bounds(item: TimelineItem) -> tuple[float, float]:
+    source_duration = max(0.05, float(item.source_ref.get("duration_seconds") or 0.05))
+    trim_start = max(0.0, min(float(item.source_ref.get("trim_start_seconds") or 0), source_duration - 0.05))
+    raw_end = item.source_ref.get("trim_end_seconds")
+    trim_end = source_duration if raw_end in (None, "") else float(raw_end or source_duration)
+    trim_end = max(trim_start + 0.05, min(trim_end, source_duration))
+    return round(trim_start, 3), round(trim_end, 3)
+
+
 def _append_audio_mix_filters(
     filter_parts: list[str],
     voiceover_input_index: int | None,
+    music_inputs: list[tuple[TimelineItem, int, Path]],
     sfx_inputs: list[tuple[TimelineItem, int, SFXAsset]],
     duration: float,
 ) -> str:
@@ -1996,6 +2424,41 @@ def _append_audio_mix_filters(
             f"asetpts=PTS-STARTPTS,volume=1.0[a_voice]"
         )
         audio_labels.append("a_voice")
+    for index, (item, input_index, _path) in enumerate(music_inputs):
+        start = max(0.0, float(item.start_seconds or 0))
+        end = max(start + 0.05, min(float(item.end_seconds or duration), duration))
+        item_duration = max(0.05, end - start)
+        start_ms = max(0, int(start * 1000))
+        trim_start, trim_end = _music_trim_bounds(item)
+        trim_duration = max(0.05, trim_end - trim_start)
+        base_volume = float(item.style.get("volume", 0.16) or 0.16)
+        ducking_volume = float(item.style.get("ducking_volume", 0.08) or 0.08)
+        volume = ducking_volume if voiceover_input_index is not None and item.style.get("ducking", True) else base_volume
+        volume = max(0.0, min(1.0, volume))
+        fade_in = max(0.0, min(float(item.style.get("fade_in_seconds", 0) or 0), item_duration / 2))
+        fade_out = max(0.0, min(float(item.style.get("fade_out_seconds", 0) or 0), item_duration / 2))
+        filters = [
+            "aresample=44100",
+            f"atrim=start={_ffmpeg_seconds(trim_start)}:end={_ffmpeg_seconds(trim_end)}",
+            "asetpts=PTS-STARTPTS",
+        ]
+        if item.style.get("loop", True):
+            filters.append(f"aloop=loop=-1:size={max(1, int(trim_duration * 44100))}")
+        filters.extend(
+            [
+                f"atrim=0:{_ffmpeg_seconds(item_duration)}",
+                "asetpts=PTS-STARTPTS",
+                f"volume={volume:.3f}",
+            ]
+        )
+        if fade_in > 0:
+            filters.append(f"afade=t=in:st=0:d={_ffmpeg_seconds(fade_in)}")
+        if fade_out > 0:
+            filters.append(f"afade=t=out:st={_ffmpeg_seconds(max(0.0, item_duration - fade_out))}:d={_ffmpeg_seconds(fade_out)}")
+        filters.append(f"adelay={start_ms}:all=1")
+        label = f"a_music_{index}"
+        filter_parts.append(f"[{input_index}:a]{','.join(filters)}[{label}]")
+        audio_labels.append(label)
     for index, (item, input_index, asset) in enumerate(sfx_inputs):
         start_ms = max(0, int(float(item.start_seconds or 0) * 1000))
         item_duration = max(0.05, min(float(asset.duration_seconds or 0.25), float(item.end_seconds - item.start_seconds or asset.duration_seconds or 0.25)))
@@ -2183,6 +2646,26 @@ def _make_scene_clip(
         effects=effects,
         transition=transition,
     )
+
+
+def _apply_video_defaults_to_clip(clip: SceneClip, preset: dict | None) -> None:
+    defaults = (preset or {}).get("video_defaults") or {}
+    transform = dict(clip.transform or {})
+    effects = dict(clip.effects or {})
+    if defaults.get("flip_horizontal") and not transform.get("flip_horizontal"):
+        transform["flip_horizontal"] = True
+    for key, default_value in {
+        "brightness": defaults.get("brightness"),
+        "contrast": defaults.get("contrast"),
+        "saturation": defaults.get("saturation"),
+    }.items():
+        if default_value in (None, ""):
+            continue
+        current = float(effects.get(key, 1) or 1)
+        if abs(current - 1) < 0.001:
+            effects[key] = float(default_value)
+    clip.transform = transform
+    clip.effects = effects
 
 
 def _media_source_ref(project_id: str, scene: ScenePlan, asset: MaterialAsset, timeline_duration: float) -> dict:
@@ -2385,7 +2868,7 @@ def _timeline_items_for_scene(project_id: str, scene: ScenePlan, asset: Material
 
 def _transition_item_for_scene(scene: ScenePlan, scene_end: float, preset: dict | None = None) -> TimelineItem:
     extras = (preset or {}).get("extras", {})
-    transition_pack_id = extras.get("transition_pack_id") or "fade"
+    transition_pack_id = _transition_id_from_preset(extras.get("transition_pack_id") or "fade", scene.order)
     start = round(max(0, scene_end - 0.35), 2)
     return TimelineItem(
         item_id=f"itm_{uuid.uuid4().hex}",
@@ -2397,6 +2880,13 @@ def _transition_item_for_scene(scene: ScenePlan, scene_end: float, preset: dict 
         source_ref={"transition_id": transition_pack_id, "transition_pack_id": transition_pack_id},
         style={"transition_id": transition_pack_id, "transition_pack_id": transition_pack_id, "duration_seconds": 0.35},
     )
+
+
+def _transition_id_from_preset(transition_pack_id: str, scene_order: int) -> str:
+    if transition_pack_id == "mix":
+        choices = ["fade", "slide_left", "zoom_in", "dissolve"]
+        return choices[(max(1, int(scene_order)) - 1) % len(choices)]
+    return transition_pack_id
 
 
 def _scenes_from_deepseek(items: list, split_settings: SplitSettings) -> list[ScenePlan]:
@@ -2416,7 +2906,7 @@ def _scenes_from_deepseek(items: list, split_settings: SplitSettings) -> list[Sc
                 caption_text=voiceover,
                 caption_chunks=make_caption_chunks(voiceover, duration),
                 visual_brief=str(item.get("visual_brief") or voiceover),
-                matching_keywords=[str(keyword) for keyword in item.get("search_keywords", [])][:3] or [voiceover[:80]],
+                matching_keywords=_normalize_keywords(item.get("search_keywords", []), 1) or _normalize_keywords([voiceover], 1),
                 duration_seconds=max(split_settings.min_scene_duration_seconds, min(split_settings.max_scene_duration_seconds, duration)),
                 template_scene_id="auto",
             )
