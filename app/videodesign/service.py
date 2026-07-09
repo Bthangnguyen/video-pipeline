@@ -50,8 +50,10 @@ from app.videodesign.schemas import (
     TTSGenerateRequest,
     TTSMeta,
     TimelineDraft,
+    TimelineItemCreateRequest,
     TimelineItem,
     TimelineItemPatch,
+    TransitionRequest,
     VideoDesignProject,
 )
 from app.videodesign.script_client import DeepSeekScriptClient
@@ -107,6 +109,8 @@ KEYWORD_STOPWORDS = {
     "you",
     "your",
 }
+
+TIMELINE_MIN_ITEM_DURATION = 0.25
 
 
 class VideoDesignService:
@@ -740,7 +744,7 @@ class VideoDesignService:
             duration_seconds=round(current, 2),
             aspect_ratio=project.aspect_ratio,
             scenes=[scene.scene_id for scene in project.scenes],
-            layers=["media_base", "voiceover_audio", "caption_default", "text_overlay", "overlay_default", "transition_out"],
+            layers=["media_base", "overlay_default", "caption_default", "text_overlay", "icon", "voiceover_audio", "background_audio", "transition_out"],
             items=items,
         )
         project.timeline = timeline
@@ -756,6 +760,33 @@ class VideoDesignService:
         asset = _asset(project, asset_id)
         return asset.local_path
 
+    def create_timeline_item(self, project_id: str, request: TimelineItemCreateRequest) -> dict:
+        project = self.store.get(project_id)
+        if not project.timeline:
+            raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
+        _scene(project, request.scene_id)
+        bounds = _scene_timeline_bounds(project, request.scene_id)
+        start = request.start_seconds if request.start_seconds is not None else bounds[0]
+        end = request.end_seconds if request.end_seconds is not None else _default_end_for_item_type(request.type, start, bounds)
+        start, end = _clamp_item_bounds(start, end, bounds)
+        layer_id = request.layer_id or _default_layer_for_item_type(request.type)
+        item = TimelineItem(
+            item_id=f"itm_{uuid.uuid4().hex}",
+            layer_id=layer_id,
+            scene_id=request.scene_id,
+            type=request.type,
+            start_seconds=start,
+            end_seconds=end,
+            source_ref=request.source_ref,
+            transform=request.transform or _default_transform_for_item_type(request.type),
+            style=request.style,
+        )
+        if layer_id not in project.timeline.layers:
+            project.timeline.layers.append(layer_id)
+        project.timeline.items.append(item)
+        self.store.put(project)
+        return {"success": True, "item": item.model_dump(), "timeline": project.timeline.model_dump()}
+
     def patch_timeline_item(self, project_id: str, item_id: str, patch: TimelineItemPatch) -> dict:
         project = self.store.get(project_id)
         if not project.timeline:
@@ -766,6 +797,12 @@ class VideoDesignService:
                     item.start_seconds = patch.start_seconds
                 if patch.end_seconds is not None:
                     item.end_seconds = patch.end_seconds
+                if item.type != "media" and (patch.start_seconds is not None or patch.end_seconds is not None):
+                    item.start_seconds, item.end_seconds = _clamp_item_bounds(
+                        item.start_seconds,
+                        item.end_seconds,
+                        _scene_timeline_bounds(project, item.scene_id),
+                    )
                 if patch.source_ref is not None:
                     item.source_ref = patch.source_ref
                 if patch.transform is not None:
@@ -775,6 +812,45 @@ class VideoDesignService:
                 self.store.put(project)
                 return {"success": True, "item": item.model_dump()}
         raise VideoDesignError(SCENE_NOT_FOUND, "Timeline item does not exist.")
+
+    def delete_timeline_item(self, project_id: str, item_id: str) -> dict:
+        project = self.store.get(project_id)
+        if not project.timeline:
+            raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
+        before = len(project.timeline.items)
+        project.timeline.items = [item for item in project.timeline.items if item.item_id != item_id]
+        if len(project.timeline.items) == before:
+            raise VideoDesignError(SCENE_NOT_FOUND, "Timeline item does not exist.")
+        self.store.put(project)
+        return {"success": True, "timeline": project.timeline.model_dump()}
+
+    def set_scene_transition(self, project_id: str, scene_id: str, request: TransitionRequest) -> dict:
+        project = self.store.get(project_id)
+        if not project.timeline:
+            raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
+        _set_transition_for_scene(project, scene_id, request.transition_id, request.duration_seconds)
+        self.store.put(project)
+        return {"success": True, "timeline": project.timeline.model_dump()}
+
+    def apply_all_transitions(self, project_id: str, request: TransitionRequest) -> dict:
+        project = self.store.get(project_id)
+        if not project.timeline:
+            raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
+        for scene_id in _transitionable_scene_ids(project):
+            _set_transition_for_scene(project, scene_id, request.transition_id, request.duration_seconds)
+        self.store.put(project)
+        return {"success": True, "timeline": project.timeline.model_dump()}
+
+    def randomize_transitions(self, project_id: str) -> dict:
+        project = self.store.get(project_id)
+        if not project.timeline:
+            raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
+        choices = ["fade", "dissolve", "slide_left", "slide_right", "zoom_in", "whip_pan", "flash_cut"]
+        for index, scene_id in enumerate(_transitionable_scene_ids(project)):
+            transition_id = choices[index % len(choices)]
+            _set_transition_for_scene(project, scene_id, transition_id, 0.35)
+        self.store.put(project)
+        return {"success": True, "timeline": project.timeline.model_dump()}
 
     def _set_progress(
         self,
@@ -1109,6 +1185,85 @@ def _sync_scene_clip_to_timeline(project: VideoDesignProject, scene: ScenePlan, 
         break
 
 
+def _scene_timeline_bounds(project: VideoDesignProject, scene_id: str) -> tuple[float, float]:
+    if not project.timeline:
+        raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
+    media = next((item for item in project.timeline.items if item.scene_id == scene_id and item.type == "media"), None)
+    if not media:
+        raise VideoDesignError(SCENE_NOT_READY, "Scene has no media timeline item.")
+    return media.start_seconds, media.end_seconds
+
+
+def _clamp_item_bounds(start: float, end: float, bounds: tuple[float, float]) -> tuple[float, float]:
+    scene_start, scene_end = bounds
+    safe_start = max(scene_start, min(float(start), scene_end - TIMELINE_MIN_ITEM_DURATION))
+    safe_end = max(safe_start + TIMELINE_MIN_ITEM_DURATION, min(float(end), scene_end))
+    return round(safe_start, 2), round(safe_end, 2)
+
+
+def _default_layer_for_item_type(item_type: str) -> str:
+    return {
+        "caption": "caption_default",
+        "icon": "icon",
+        "overlay": "overlay_default",
+        "text": "text_overlay",
+        "transition": "transition_out",
+    }.get(item_type, "text_overlay")
+
+
+def _default_transform_for_item_type(item_type: str) -> dict:
+    if item_type == "icon":
+        return {"x": 58, "y": 42, "scale": 1, "rotation": 0}
+    if item_type == "text":
+        return {"x": 50, "y": 18, "scale": 1, "rotation": 0}
+    return {}
+
+
+def _default_end_for_item_type(item_type: str, start: float, bounds: tuple[float, float]) -> float:
+    if item_type in {"caption", "overlay"}:
+        return bounds[1]
+    return min(bounds[1], start + 1.8)
+
+
+def _transitionable_scene_ids(project: VideoDesignProject) -> list[str]:
+    if not project.timeline:
+        return []
+    media_items = sorted(
+        [item for item in project.timeline.items if item.type == "media"],
+        key=lambda item: item.start_seconds,
+    )
+    return [item.scene_id for item in media_items[:-1]]
+
+
+def _set_transition_for_scene(project: VideoDesignProject, scene_id: str, transition_id: str, duration_seconds: float) -> None:
+    if scene_id not in _transitionable_scene_ids(project):
+        raise VideoDesignError(INVALID_PROJECT_INPUT, "Selected scene has no next scene for transition.")
+    media = next(item for item in project.timeline.items if item.scene_id == scene_id and item.type == "media")
+    project.timeline.items = [
+        item for item in project.timeline.items if not (item.scene_id == scene_id and item.type == "transition")
+    ]
+    if transition_id == "none":
+        return
+    duration = max(0.05, min(float(duration_seconds or 0.35), min(1.5, media.end_seconds - media.start_seconds)))
+    item = TimelineItem(
+        item_id=f"itm_{uuid.uuid4().hex}",
+        layer_id="transition_out",
+        scene_id=scene_id,
+        type="transition",
+        start_seconds=round(max(media.start_seconds, media.end_seconds - duration), 2),
+        end_seconds=round(media.end_seconds, 2),
+        source_ref={
+            "from_scene_id": scene_id,
+            "transition_id": transition_id,
+            "transition_pack_id": transition_id,
+        },
+        style={"transition_id": transition_id, "duration_seconds": round(duration, 2)},
+    )
+    if "transition_out" not in project.timeline.layers:
+        project.timeline.layers.append("transition_out")
+    project.timeline.items.append(item)
+
+
 def _timeline_items_for_scene(project_id: str, scene: ScenePlan, asset: MaterialAsset, start: float, end: float, preset: dict | None = None) -> list[TimelineItem]:
     duration = end - start
     extras = (preset or {}).get("extras", {})
@@ -1141,7 +1296,7 @@ def _timeline_items_for_scene(project_id: str, scene: ScenePlan, asset: Material
             type="text",
             start_seconds=start,
             end_seconds=round(start + min(duration, 2.5), 2),
-            source_ref={"text": scene.on_screen_text},
+            source_ref={"text": "", "auto_generated": False},
             transform={"x": 50, "y": 18, "scale": 1, "rotation": 0},
         ),
     ]
@@ -1175,7 +1330,7 @@ def _timeline_items_for_scene(project_id: str, scene: ScenePlan, asset: Material
 
 def _transition_item_for_scene(scene: ScenePlan, scene_end: float, preset: dict | None = None) -> TimelineItem:
     extras = (preset or {}).get("extras", {})
-    transition_pack_id = extras.get("transition_pack_id") or "clean_cut"
+    transition_pack_id = extras.get("transition_pack_id") or "fade"
     start = round(max(0, scene_end - 0.35), 2)
     return TimelineItem(
         item_id=f"itm_{uuid.uuid4().hex}",
@@ -1184,8 +1339,8 @@ def _transition_item_for_scene(scene: ScenePlan, scene_end: float, preset: dict 
         type="transition",
         start_seconds=start,
         end_seconds=round(scene_end, 2),
-        source_ref={"transition_pack_id": transition_pack_id},
-        style={"transition_pack_id": transition_pack_id},
+        source_ref={"transition_id": transition_pack_id, "transition_pack_id": transition_pack_id},
+        style={"transition_id": transition_pack_id, "transition_pack_id": transition_pack_id, "duration_seconds": 0.35},
     )
 
 

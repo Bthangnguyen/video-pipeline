@@ -20,12 +20,18 @@ const state = {
 };
 
 let progressTimer = null;
+let timelineFrameRequest = null;
 let dragState = null;
 const TIMELINE_LABEL_WIDTH = 122;
 const TIMELINE_LABEL_WIDTH_COMPACT = 96;
 const TIMELINE_MIN_CLIP_SECONDS = 0.25;
 const TIMELINE_MIN_ZOOM = 18;
 const TIMELINE_MAX_ZOOM = 140;
+const FONT_OPTIONS = ["Inter", "Montserrat", "Poppins", "Anton", "Bebas Neue", "Arial", "Georgia"];
+const CAPTION_MODES = ["one_word", "full_line", "word_reveal", "active_word_highlight", "typewriter", "two_line_karaoke"];
+const OVERLAY_OPTIONS = ["none", "caption_shadow", "soft_vignette", "focus_frame", "dim_background", "caption_shade", "subtle_grain"];
+const TRANSITION_OPTIONS = ["none", "fade", "dissolve", "slide_left", "slide_right", "slide_up", "zoom_in", "zoom_out", "whip_pan", "flash_cut"];
+const ICON_OPTIONS = ["arrow_right", "circle", "rectangle", "underline", "check", "x_mark", "starburst", "pointer", "question", "exclamation"];
 
 const viewTitles = {
   start: "Create video",
@@ -1023,16 +1029,17 @@ function renderStudioToolPanel() {
       </button>
     `).join("") || `<div class="vd-empty">No scenes.</div>`}`;
   } else if (state.selectedTool === "text") {
-    const item = selectedItem();
-    panel.innerHTML = `
-      <h3>Text overlay</h3>
-      <label>Text <input id="studio-text-input" value="${escapeHtml(textForItem(item))}"></label>
-      <p class="vd-muted">Drag the text directly on the preview canvas.</p>
-      <button id="save-studio-text" type="button">Save text</button>
-    `;
-    panel.querySelector("#save-studio-text")?.addEventListener("click", () => saveStudioText());
+    renderTextStylePanel(panel, row);
   } else if (state.selectedTool === "media") {
     renderStudioMediaPanel(panel, row);
+  } else if (state.selectedTool === "captions") {
+    renderCaptionStylePanel(panel, row);
+  } else if (state.selectedTool === "overlay") {
+    renderOverlayPanel(panel, row);
+  } else if (state.selectedTool === "transitions") {
+    renderTransitionsPanel(panel, row);
+  } else if (state.selectedTool === "icons") {
+    renderIconsPanel(panel, row);
   } else {
     panel.innerHTML = `<h3>${escapeHtml(titleCase(state.selectedTool))}</h3><p class="vd-muted">Controls for this tool will build on the selected timeline item.</p>`;
   }
@@ -1043,6 +1050,448 @@ function renderStudioToolPanel() {
       renderStudio();
     });
   });
+}
+
+function renderTextStylePanel(panel, row) {
+  const item = selectedItem()?.type === "text" ? selectedItem() : itemForScene("text", row);
+  if (!row || !item) {
+    panel.innerHTML = `<h3>Text overlay</h3><p class="vd-muted">Select a scene with a text item.</p>`;
+    return;
+  }
+  const style = textStyle(item);
+  const transform = item.transform || {};
+  panel.innerHTML = `
+    <h3>Text overlay</h3>
+    <label>Text <input id="studio-text-input" value="${escapeHtml(textForItem(item))}" placeholder="Optional text overlay"></label>
+    <label>Font <select id="studio-text-font">${fontOptionsHtml(style.font_family)}</select></label>
+    <div class="vd-control-grid">
+      <label>Size <input id="studio-text-size" type="number" min="14" max="120" value="${Number(style.font_size || 42)}"></label>
+      <label>Color <input id="studio-text-color" type="color" value="${escapeHtml(style.text_color || "#ffffff")}"></label>
+    </div>
+    <div class="vd-button-row">
+      <label><input id="studio-text-bold" type="checkbox" ${Number(style.font_weight || 700) >= 700 ? "checked" : ""}> Bold</label>
+      <label><input id="studio-text-italic" type="checkbox" ${style.italic ? "checked" : ""}> Italic</label>
+      <label><input id="studio-text-shadow" type="checkbox" ${style.shadow !== false ? "checked" : ""}> Shadow</label>
+    </div>
+    <label>Scale <input id="studio-text-scale" type="range" min="0.5" max="2" step="0.05" value="${Number(transform.scale || 1)}"></label>
+    <p class="vd-muted">Drag the text directly on the preview canvas.</p>
+    <button id="save-studio-text" class="vd-primary" type="button">Save text style</button>
+  `;
+  panel.querySelectorAll("input, select").forEach((input) => input.addEventListener("input", () => applyTextDraftToStage(panel, item)));
+  panel.querySelector("#save-studio-text")?.addEventListener("click", () => saveStudioText(panel, item));
+  applyTextDraftToStage(panel, item);
+}
+
+function renderCaptionStylePanel(panel, row) {
+  const item = itemForScene("caption", row);
+  if (!row || !item) {
+    panel.innerHTML = `<h3>Captions</h3><p class="vd-muted">Create a timeline with captions first.</p>`;
+    return;
+  }
+  const style = captionStyle(item);
+  panel.innerHTML = `
+    <h3>Captions</h3>
+    <label>Display mode <select id="caption-mode">${optionListHtml(CAPTION_MODES, style.caption_mode || "active_word_highlight", captionModeLabel)}</select></label>
+    <label>Font <select id="caption-font">${fontOptionsHtml(style.font_family)}</select></label>
+    <div class="vd-control-grid">
+      <label>Size <input id="caption-size" type="number" min="14" max="120" value="${Number(style.font_size || 46)}"></label>
+      <label>Text <input id="caption-color" type="color" value="${escapeHtml(style.text_color || "#ffffff")}"></label>
+      <label>Active <input id="caption-active-color" type="color" value="${escapeHtml(style.active_word_color || "#3ce6ac")}"></label>
+      <label>Outline <input id="caption-stroke-color" type="color" value="${escapeHtml(style.stroke_color || "#111111")}"></label>
+    </div>
+    <div class="vd-button-row">
+      <label><input id="caption-bold" type="checkbox" ${Number(style.font_weight || 800) >= 700 ? "checked" : ""}> Bold</label>
+      <label><input id="caption-italic" type="checkbox" ${style.italic ? "checked" : ""}> Italic</label>
+      <label><input id="caption-shadow" type="checkbox" ${style.shadow !== false ? "checked" : ""}> Shadow</label>
+    </div>
+    <button id="save-caption-style" class="vd-primary" type="button">Save captions</button>
+  `;
+  panel.querySelectorAll("input, select").forEach((input) => input.addEventListener("input", () => applyCaptionDraftToStage(panel, item)));
+  panel.querySelector("#save-caption-style")?.addEventListener("click", () => saveCaptionStyle(panel, item));
+  applyCaptionDraftToStage(panel, item);
+}
+
+function renderOverlayPanel(panel, row) {
+  const item = itemForScene("overlay", row);
+  const overlayId = overlayIdForItem(item);
+  const opacity = Number(item?.style?.opacity ?? 0.35);
+  panel.innerHTML = `
+    <h3>Overlay</h3>
+    <div class="vd-option-grid">
+      ${OVERLAY_OPTIONS.map((id) => optionButtonHtml("overlay-option", id, overlayLabel(id), id === overlayId)).join("")}
+    </div>
+    <label>Opacity <input id="overlay-opacity" type="range" min="0" max="0.9" step="0.05" value="${opacity}"></label>
+    <div class="vd-button-row">
+      <button id="save-overlay" class="vd-primary" type="button">Apply scene</button>
+      <button id="apply-overlay-all" type="button">Apply all scenes</button>
+    </div>
+  `;
+  panel.querySelectorAll("[data-overlay-option]").forEach((button) => {
+    button.addEventListener("click", () => {
+      panel.querySelectorAll("[data-overlay-option]").forEach((peer) => peer.dataset.active = "false");
+      button.dataset.active = "true";
+      previewOverlay(button.dataset.overlayOption, Number(inputValue("overlay-opacity", opacity)));
+    });
+  });
+  panel.querySelector("#overlay-opacity")?.addEventListener("input", () => previewOverlay(selectedOption(panel, "overlay-option"), Number(inputValue("overlay-opacity", opacity))));
+  panel.querySelector("#save-overlay")?.addEventListener("click", () => saveOverlay(row?.scene.scene_id, selectedOption(panel, "overlay-option"), Number(inputValue("overlay-opacity", opacity))));
+  panel.querySelector("#apply-overlay-all")?.addEventListener("click", () => applyOverlayAll(selectedOption(panel, "overlay-option"), Number(inputValue("overlay-opacity", opacity))));
+  previewOverlay(overlayId, opacity);
+}
+
+function renderTransitionsPanel(panel, row) {
+  const item = itemForScene("transition", row);
+  const transitionId = transitionIdForItem(item);
+  const duration = Number(item?.style?.duration_seconds || 0.35);
+  const isLast = row && !_transitionHasNextScene(row.scene.scene_id);
+  panel.innerHTML = `
+    <h3>Transitions</h3>
+    ${isLast ? `<p class="vd-muted">This is the last scene, so there is no next cut.</p>` : ""}
+    <label>Type <select id="transition-id">${optionListHtml(TRANSITION_OPTIONS, transitionId, transitionLabel)}</select></label>
+    <label>Duration <select id="transition-duration">${optionListHtml(["0.25", "0.35", "0.50", "0.75"], String(duration.toFixed(2)), (value) => `${value}s`)}</select></label>
+    <div class="vd-button-row">
+      <button id="apply-transition" class="vd-primary" type="button" ${isLast ? "disabled" : ""}>Apply selected cut</button>
+      <button id="apply-transition-all" type="button">Apply all cuts</button>
+      <button id="random-transition" type="button">Random mix</button>
+      <button id="clear-transition-all" type="button">Clear all</button>
+    </div>
+  `;
+  panel.querySelector("#apply-transition")?.addEventListener("click", () => saveSelectedTransition(row.scene.scene_id));
+  panel.querySelector("#apply-transition-all")?.addEventListener("click", () => saveAllTransitions(inputValue("transition-id", "fade")));
+  panel.querySelector("#random-transition")?.addEventListener("click", randomizeTransitions);
+  panel.querySelector("#clear-transition-all")?.addEventListener("click", () => saveAllTransitions("none"));
+}
+
+function renderIconsPanel(panel, row) {
+  const item = selectedItem()?.type === "icon" ? selectedItem() : itemForScene("icon", row);
+  panel.innerHTML = `
+    <h3>Icons</h3>
+    <div class="vd-icon-picker">
+      ${ICON_OPTIONS.map((id) => optionButtonHtml("icon-option", id, iconPreview(id), false)).join("")}
+    </div>
+    <button id="add-icon" class="vd-primary" type="button">Add icon</button>
+    ${item ? `
+      <hr>
+      <label>Color <input id="icon-color" type="color" value="${escapeHtml(item.style?.color || "#ffffff")}"></label>
+      <label>Size <input id="icon-scale" type="range" min="0.4" max="2.5" step="0.05" value="${Number(item.transform?.scale || 1)}"></label>
+      <label>Rotation <input id="icon-rotation" type="range" min="-45" max="45" step="1" value="${Number(item.transform?.rotation || 0)}"></label>
+      <div class="vd-button-row">
+        <button id="save-icon" type="button">Save icon</button>
+        <button id="delete-icon" class="vd-danger" type="button">Delete</button>
+      </div>
+      <p class="vd-muted">Drag the icon directly on the preview canvas.</p>
+    ` : `<p class="vd-muted">Choose an icon and add it to the selected scene.</p>`}
+  `;
+  panel.querySelectorAll("[data-icon-option]").forEach((button) => {
+    button.addEventListener("click", () => {
+      panel.querySelectorAll("[data-icon-option]").forEach((peer) => peer.dataset.active = "false");
+      button.dataset.active = "true";
+    });
+  });
+  panel.querySelector("#add-icon")?.addEventListener("click", () => addIconToScene(row?.scene.scene_id, selectedOption(panel, "icon-option") || "arrow_right"));
+  panel.querySelectorAll("#icon-color, #icon-scale, #icon-rotation").forEach((input) => {
+    input.addEventListener("input", () => applyIconDraftToStage(panel, item));
+  });
+  panel.querySelector("#save-icon")?.addEventListener("click", () => saveIcon(panel, item));
+  panel.querySelector("#delete-icon")?.addEventListener("click", () => deleteTimelineItem(item?.item_id));
+}
+
+function itemForScene(type, row = selectedRow()) {
+  return timelineItems().find((item) => item.type === type && item.scene_id === row?.scene.scene_id) || null;
+}
+
+function itemsForScene(type, row = selectedRow()) {
+  return timelineItems().filter((item) => item.type === type && item.scene_id === row?.scene.scene_id);
+}
+
+function fontOptionsHtml(selected) {
+  return optionListHtml(FONT_OPTIONS, selected || "Montserrat", (value) => value);
+}
+
+function optionListHtml(values, selected, labeler) {
+  return values.map((value) => `<option value="${escapeHtml(value)}" ${String(value) === String(selected) ? "selected" : ""}>${escapeHtml(labeler(value))}</option>`).join("");
+}
+
+function optionButtonHtml(datasetName, value, label, active) {
+  return `<button data-${datasetName}="${escapeHtml(value)}" data-active="${active ? "true" : "false"}" type="button">${label}</button>`;
+}
+
+function selectedOption(panel, datasetName) {
+  return panel.querySelector(`[data-${datasetName}][data-active="true"]`)?.dataset[toDatasetKey(datasetName)] || "";
+}
+
+function toDatasetKey(name) {
+  return name.replace(/-([a-z])/g, (_match, char) => char.toUpperCase());
+}
+
+function textStyle(item) {
+  return {
+    font_family: "Montserrat",
+    font_size: 42,
+    font_weight: 800,
+    italic: false,
+    text_color: "#ffffff",
+    shadow: true,
+    ...(item?.style || {}),
+  };
+}
+
+function captionStyle(item) {
+  return {
+    caption_mode: "one_word",
+    font_family: "Montserrat",
+    font_size: 46,
+    font_weight: 800,
+    italic: false,
+    text_color: "#ffffff",
+    active_word_color: "#3ce6ac",
+    stroke_color: "#111111",
+    shadow: true,
+    ...(item?.style || {}),
+  };
+}
+
+function collectTextStyle(panel) {
+  return {
+    font_family: inputValue("studio-text-font", "Montserrat"),
+    font_size: Number(inputValue("studio-text-size", 42)),
+    font_weight: inputChecked("studio-text-bold", true) ? 800 : 400,
+    italic: inputChecked("studio-text-italic", false),
+    text_color: inputValue("studio-text-color", "#ffffff"),
+    shadow: inputChecked("studio-text-shadow", true),
+  };
+}
+
+function collectCaptionStyle(panel) {
+  return {
+    caption_mode: inputValue("caption-mode", "one_word"),
+    font_family: inputValue("caption-font", "Montserrat"),
+    font_size: Number(inputValue("caption-size", 46)),
+    font_weight: inputChecked("caption-bold", true) ? 800 : 400,
+    italic: inputChecked("caption-italic", false),
+    text_color: inputValue("caption-color", "#ffffff"),
+    active_word_color: inputValue("caption-active-color", "#3ce6ac"),
+    stroke_color: inputValue("caption-stroke-color", "#111111"),
+    shadow: inputChecked("caption-shadow", true),
+  };
+}
+
+function applyTextDraftToStage(panel, item) {
+  if (!item) return;
+  item.source_ref = { ...(item.source_ref || {}), text: inputValue("studio-text-input", textForItem(item)) };
+  item.source_ref.user_text = true;
+  item.style = collectTextStyle(panel);
+  item.transform = { ...(item.transform || {}), scale: Number(inputValue("studio-text-scale", item.transform?.scale || 1)) };
+  renderStudioText(item);
+}
+
+function applyCaptionDraftToStage(panel, item) {
+  if (!item) return;
+  item.style = collectCaptionStyle(panel);
+  updateCaptionPreview(state.timelinePlayheadSeconds);
+}
+
+async function saveCaptionStyle(panel, item) {
+  if (!item || item.type !== "caption") return;
+  applyCaptionDraftToStage(panel, item);
+  await patchTimelineItem(item.item_id, { style: item.style });
+}
+
+function overlayIdForItem(item) {
+  return item?.source_ref?.overlay_id || item?.source_ref?.overlay_pack_id || item?.style?.overlay_pack_id || "none";
+}
+
+function transitionIdForItem(item) {
+  return item?.source_ref?.transition_id || item?.source_ref?.transition_pack_id || item?.style?.transition_id || item?.style?.transition_pack_id || "none";
+}
+
+function previewOverlay(overlayId, opacity = 0.35) {
+  const stage = document.getElementById("studio-stage");
+  if (!stage) return;
+  stage.dataset.overlay = overlayId || "none";
+  stage.style.setProperty("--scene-overlay-opacity", String(opacity));
+}
+
+async function saveOverlay(sceneId, overlayId, opacity) {
+  if (!sceneId) return;
+  await run("Saving overlay", async () => {
+    await upsertOverlayForScene(sceneId, overlayId, opacity);
+  });
+}
+
+async function applyOverlayAll(overlayId, opacity) {
+  await run("Applying overlay", async () => {
+    for (const row of state.rows) {
+      await upsertOverlayForScene(row.scene.scene_id, overlayId, opacity);
+    }
+  });
+}
+
+async function upsertOverlayForScene(sceneId, overlayId, opacity) {
+  const existing = timelineItems().find((item) => item.scene_id === sceneId && item.type === "overlay");
+  if (overlayId === "none") {
+    if (existing) await deleteTimelineItem(existing.item_id, false);
+    return;
+  }
+  const patch = {
+    source_ref: { overlay_id: overlayId, overlay_pack_id: overlayId },
+    style: { overlay_id: overlayId, overlay_pack_id: overlayId, opacity },
+  };
+  if (existing) {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/timeline/items/${existing.item_id}`, {
+      method: "PATCH",
+      body: patch,
+    });
+    replaceTimelineItem(data.item);
+    return;
+  }
+  const bounds = sceneBounds(sceneId);
+  const data = await api(`/api/videodesign/projects/${state.projectId}/timeline/items`, {
+    method: "POST",
+    body: {
+      scene_id: sceneId,
+      type: "overlay",
+      layer_id: "overlay_default",
+      start_seconds: bounds.start,
+      end_seconds: bounds.end,
+      ...patch,
+    },
+  });
+  state.timeline = data.timeline;
+}
+
+function _transitionHasNextScene(sceneId) {
+  const media = timelineItems().filter((item) => item.type === "media").sort((a, b) => a.start_seconds - b.start_seconds);
+  return media.findIndex((item) => item.scene_id === sceneId) >= 0 && media.findIndex((item) => item.scene_id === sceneId) < media.length - 1;
+}
+
+async function saveSelectedTransition(sceneId) {
+  await run("Saving transition", async () => {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/scenes/${sceneId}/transition`, {
+      method: "POST",
+      body: {
+        transition_id: inputValue("transition-id", "fade"),
+        duration_seconds: Number(inputValue("transition-duration", 0.35)),
+      },
+    });
+    state.timeline = data.timeline;
+  });
+}
+
+async function saveAllTransitions(transitionId) {
+  await run("Applying transitions", async () => {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/transitions/apply-all`, {
+      method: "POST",
+      body: {
+        transition_id: transitionId,
+        duration_seconds: Number(inputValue("transition-duration", 0.35)),
+      },
+    });
+    state.timeline = data.timeline;
+  });
+}
+
+async function randomizeTransitions() {
+  await run("Randomizing transitions", async () => {
+    const data = await api(`/api/videodesign/projects/${state.projectId}/transitions/randomize`, { method: "POST" });
+    state.timeline = data.timeline;
+  });
+}
+
+async function addIconToScene(sceneId, iconId) {
+  if (!sceneId) return;
+  await run("Adding icon", async () => {
+    const bounds = sceneBounds(sceneId);
+    const start = clamp(state.timelinePlayheadSeconds || bounds.start, bounds.start, Math.max(bounds.start, bounds.end - 0.4));
+    const data = await api(`/api/videodesign/projects/${state.projectId}/timeline/items`, {
+      method: "POST",
+      body: {
+        scene_id: sceneId,
+        type: "icon",
+        layer_id: "icon",
+        start_seconds: start,
+        end_seconds: Math.min(bounds.end, start + 1.8),
+        source_ref: { icon_id: iconId },
+        transform: { x: 58, y: 42, scale: 1, rotation: 0 },
+        style: { color: "#ffffff", shadow: true },
+      },
+    });
+    state.timeline = data.timeline;
+    state.selectedItemId = data.item.item_id;
+    state.selectedTool = "icons";
+  });
+}
+
+function applyIconDraftToStage(panel, item) {
+  if (!item) return;
+  item.style = { ...(item.style || {}), color: inputValue("icon-color", "#ffffff") };
+  item.transform = {
+    ...(item.transform || {}),
+    scale: Number(inputValue("icon-scale", item.transform?.scale || 1)),
+    rotation: Number(inputValue("icon-rotation", item.transform?.rotation || 0)),
+  };
+  renderStudioIcons();
+}
+
+async function saveIcon(panel, item) {
+  if (!item || item.type !== "icon") return;
+  applyIconDraftToStage(panel, item);
+  await patchTimelineItem(item.item_id, { transform: item.transform, style: item.style });
+}
+
+async function deleteTimelineItem(itemId, rerender = true) {
+  if (!itemId) return;
+  const data = await api(`/api/videodesign/projects/${state.projectId}/timeline/items/${itemId}`, { method: "DELETE" });
+  state.timeline = data.timeline;
+  if (state.selectedItemId === itemId) state.selectedItemId = "";
+  if (rerender) renderStudio();
+}
+
+function replaceTimelineItem(item) {
+  const index = state.timeline?.items.findIndex((entry) => entry.item_id === item.item_id) ?? -1;
+  if (index >= 0) state.timeline.items[index] = item;
+}
+
+function sceneBounds(sceneId) {
+  const media = timelineItems().find((item) => item.scene_id === sceneId && item.type === "media");
+  return { start: media?.start_seconds || 0, end: media?.end_seconds || 0 };
+}
+
+function captionModeLabel(value) {
+  return {
+    one_word: "One word",
+    full_line: "Full line",
+    word_reveal: "Word reveal",
+    active_word_highlight: "Active word",
+    typewriter: "Typewriter",
+    two_line_karaoke: "Two-line karaoke",
+  }[value] || String(value).replaceAll("_", " ");
+}
+
+function iconPreview(value) {
+  return `<span class="vd-icon-sample">${iconGlyph(value)}</span><small>${escapeHtml(iconLabel(value))}</small>`;
+}
+
+function iconGlyph(value) {
+  return {
+    arrow_right: "->",
+    circle: "O",
+    rectangle: "▭",
+    underline: "_",
+    check: "✓",
+    x_mark: "×",
+    starburst: "✦",
+    pointer: "⌖",
+    question: "?",
+    exclamation: "!",
+  }[value] || "•";
+}
+
+function iconLabel(value) {
+  return {
+    arrow_right: "Arrow",
+    x_mark: "X mark",
+  }[value] || String(value).replaceAll("_", " ");
 }
 
 function renderStudioMediaPanel(panel, row) {
@@ -1251,7 +1700,9 @@ function renderStudioStage() {
   const audioItem = timelineItems().find((item) => item.type === "audio" && item.scene_id === row?.scene.scene_id);
   const text = timelineItems().find((item) => item.type === "text" && item.scene_id === row?.scene.scene_id);
   const caption = timelineItems().find((item) => item.type === "caption" && item.scene_id === row?.scene.scene_id);
+  const overlay = timelineItems().find((item) => item.type === "overlay" && item.scene_id === row?.scene.scene_id);
   const video = document.getElementById("studio-video");
+  const nextVideo = document.getElementById("studio-next-video");
   const audio = document.getElementById("studio-audio");
   const captionEl = document.getElementById("studio-caption");
   const textEl = document.getElementById("studio-text");
@@ -1260,6 +1711,7 @@ function renderStudioStage() {
   const mediaState = document.getElementById("studio-media-state");
 
   video.muted = true;
+  if (nextVideo) nextVideo.muted = true;
   if (audio) audio.muted = false;
   const mediaChanged = setPlaybackElementSource(video, media?.source_ref?.media_url || "");
   const audioChanged = setPlaybackElementSource(audio, audioItem?.source_ref?.audio_url || "");
@@ -1290,18 +1742,126 @@ function renderStudioStage() {
 
   sceneLabel.textContent = row ? `Scene ${row.scene.order}` : "No scene selected";
   mediaState.textContent = studioMediaStateLabel(media, audioItem);
-  stage.dataset.overlay = state.preset.extras.overlay_pack_id || "caption_shadow";
-  stage.dataset.captionStyle = state.preset.captions.style_id || "bold_outline";
-  const chunks = caption?.source_ref?.caption_chunks || row?.scene.caption_chunks || [];
-  captionEl.textContent = chunks.map((chunk) => chunk.text).join(" ") || row?.scene.caption_text || "";
+  stage.dataset.overlay = overlayIdForItem(overlay);
+  stage.style.setProperty("--scene-overlay-opacity", String(Number(overlay?.style?.opacity ?? 0.35)));
+  stage.dataset.captionStyle = caption?.style?.caption_style_id || state.preset.captions.style_id || "bold_outline";
+  captionEl.dataset.itemId = caption?.item_id || "";
   textEl.textContent = textForItem(text) || row?.scene.on_screen_text || "";
   textEl.dataset.itemId = text?.item_id || "";
-  const transform = text?.transform || { x: 50, y: 18 };
-  textEl.style.left = `${Number(transform.x ?? 50)}%`;
-  textEl.style.top = `${Number(transform.y ?? 18)}%`;
+  renderStudioText(text);
+  renderStudioIcons();
   if (!state.timelinePlaying && media) updateStudioClock(media.start_seconds);
   else updateStudioClock();
   updateStudioPlaybackButton();
+}
+
+function renderStudioText(item) {
+  const textEl = document.getElementById("studio-text");
+  if (!textEl) return;
+  if (!item) {
+    textEl.textContent = "";
+    textEl.dataset.itemId = "";
+    return;
+  }
+  const style = textStyle(item);
+  const transform = item.transform || { x: 50, y: 18, scale: 1, rotation: 0 };
+  const text = visibleTextForItem(item);
+  textEl.textContent = text;
+  textEl.dataset.itemId = item.item_id;
+  textEl.style.left = `${Number(transform.x ?? 50)}%`;
+  textEl.style.top = `${Number(transform.y ?? 18)}%`;
+  textEl.style.transform = `translate(-50%, -50%) scale(${Number(transform.scale || 1)}) rotate(${Number(transform.rotation || 0)}deg)`;
+  textEl.style.fontFamily = style.font_family || "Montserrat";
+  textEl.style.fontSize = `${Number(style.font_size || 42)}px`;
+  textEl.style.fontWeight = String(style.font_weight || 800);
+  textEl.style.fontStyle = style.italic ? "italic" : "normal";
+  textEl.style.color = style.text_color || "#ffffff";
+  textEl.style.textShadow = style.shadow === false ? "none" : "0 2px 12px rgba(0,0,0,0.78)";
+}
+
+function visibleTextForItem(item) {
+  const text = textForItem(item);
+  const row = selectedRow();
+  if (!text) return "";
+  const isDefaultSceneText = row && [row.scene.on_screen_text, row.scene.voiceover_text, row.scene.caption_text]
+    .filter(Boolean)
+    .some((value) => String(value).trim() === String(text).trim());
+  if (isDefaultSceneText && !item?.source_ref?.user_text) return "";
+  return text;
+}
+
+function updateCaptionPreview(globalTime = state.timelinePlayheadSeconds) {
+  const row = selectedRow();
+  const item = itemForScene("caption", row);
+  const captionEl = document.getElementById("studio-caption");
+  if (!captionEl) return;
+  const chunks = item?.source_ref?.caption_chunks || row?.scene.caption_chunks || [];
+  const style = captionStyle(item);
+  applyCaptionStyleToElement(captionEl, style);
+  captionEl.innerHTML = captionHtmlForTime(chunks, row, item, globalTime, style);
+}
+
+function applyCaptionStyleToElement(element, style) {
+  element.style.fontFamily = style.font_family || "Montserrat";
+  element.style.fontSize = `${Number(style.font_size || 46)}px`;
+  element.style.fontWeight = String(style.font_weight || 800);
+  element.style.fontStyle = style.italic ? "italic" : "normal";
+  element.style.color = style.text_color || "#ffffff";
+  element.style.textShadow = style.shadow === false ? "none" : `0 2px 10px ${style.stroke_color || "#111111"}`;
+}
+
+function captionHtmlForTime(chunks, row, item, globalTime, style) {
+  const text = chunks.map((chunk) => chunk.text).join(" ") || row?.scene.caption_text || row?.scene.voiceover_text || "";
+  if (!text) return "";
+  const media = timelineItems().find((entry) => entry.scene_id === row?.scene.scene_id && entry.type === "media");
+  const local = Math.max(0, Number(globalTime || 0) - Number(media?.start_seconds || 0));
+  const words = text.split(/\s+/).filter(Boolean);
+  if (!words.length) return escapeHtml(text);
+  const duration = Math.max(0.25, row?.scene.duration_seconds || item?.end_seconds - item?.start_seconds || words.length * 0.35);
+  const activeIndex = clamp(Math.floor((local / duration) * words.length), 0, words.length - 1);
+  const mode = style.caption_mode || "active_word_highlight";
+  if (mode === "one_word") return escapeHtml(words[activeIndex] || "");
+  if (mode === "full_line") return escapeHtml(text);
+  if (mode === "word_reveal" || mode === "typewriter") return escapeHtml(words.slice(0, activeIndex + 1).join(" "));
+  if (mode === "two_line_karaoke") {
+    const start = Math.max(0, activeIndex - 3);
+    const shown = words.slice(start, Math.min(words.length, activeIndex + 4));
+    return shown.map((word, index) => {
+      const realIndex = start + index;
+      const active = realIndex === activeIndex;
+      return `<span ${active ? `class="is-active" style="color:${escapeHtml(style.active_word_color || "#3ce6ac")}"` : ""}>${escapeHtml(word)}</span>`;
+    }).join(" ");
+  }
+  return words.map((word, index) => {
+    const active = index === activeIndex;
+    return `<span ${active ? `class="is-active" style="color:${escapeHtml(style.active_word_color || "#3ce6ac")}"` : ""}>${escapeHtml(word)}</span>`;
+  }).join(" ");
+}
+
+function renderStudioIcons() {
+  const layer = document.getElementById("studio-icon-layer");
+  if (!layer) return;
+  const row = selectedRow();
+  const icons = itemsForScene("icon", row);
+  layer.innerHTML = icons.map((item) => {
+    const transform = item.transform || {};
+    const style = item.style || {};
+    return `
+      <button class="vd-canvas-icon" data-icon-item-id="${item.item_id}" data-active="${item.item_id === state.selectedItemId}" type="button"
+        style="left:${Number(transform.x ?? 50)}%;top:${Number(transform.y ?? 50)}%;transform:translate(-50%, -50%) scale(${Number(transform.scale || 1)}) rotate(${Number(transform.rotation || 0)}deg);color:${escapeHtml(style.color || "#ffffff")}">
+        ${escapeHtml(iconGlyph(item.source_ref?.icon_id || "arrow_right"))}
+      </button>
+    `;
+  }).join("");
+  layer.querySelectorAll("[data-icon-item-id]").forEach((button) => {
+    button.addEventListener("pointerdown", startCanvasIconDrag);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.selectedItemId = button.dataset.iconItemId;
+      state.selectedTool = "icons";
+      renderStudio();
+    });
+  });
 }
 
 function studioMediaStateLabel(media, audioItem) {
@@ -1436,7 +1996,7 @@ function niceTimelineStep(rawStep) {
 }
 
 function editableTimelineItem(item) {
-  return ["media", "text", "caption", "overlay"].includes(item?.type);
+  return ["media", "text", "caption", "overlay", "icon", "transition"].includes(item?.type);
 }
 
 function fitTimeline() {
@@ -1556,7 +2116,9 @@ function playStudioAudio() {
 
 function pauseStudioMedia() {
   document.getElementById("studio-video")?.pause();
+  document.getElementById("studio-next-video")?.pause();
   document.getElementById("studio-audio")?.pause();
+  stopTimelineFrameTicker();
 }
 
 function playStudioVideo() {
@@ -1568,6 +2130,7 @@ function playStudioVideo() {
     return;
   }
   const promise = video.play();
+  startTimelineFrameTicker();
   if (promise?.catch) {
     promise.catch(() => {
       state.timelinePlaying = false;
@@ -1617,6 +2180,9 @@ function trimStatusLabel(item) {
 
 function timelineClipLabel(item) {
   if (item?.type === "media") return trimStatusLabel(item);
+  if (item?.type === "icon") return iconLabel(item.source_ref?.icon_id || "icon");
+  if (item?.type === "overlay") return overlayLabel(overlayIdForItem(item));
+  if (item?.type === "transition") return transitionLabel(transitionIdForItem(item));
   return itemLabel(item);
 }
 
@@ -1625,18 +2191,162 @@ function applyStudioMediaEffects(video, media) {
   if (!media) {
     video.style.transform = "";
     video.style.filter = "";
+    video.style.opacity = "";
+    video.dataset.baseTransform = "";
+    video.dataset.transitionTransform = "";
     return;
   }
   const transform = media.transform || {};
   const effects = media.source_ref?.effects || {};
   const flip = transform.flip_horizontal ? "scaleX(-1)" : "scaleX(1)";
   const scale = Number(transform.scale || 1);
-  video.style.transform = `${flip} scale(${scale})`;
+  video.dataset.baseTransform = `${flip} scale(${scale})`;
+  setStudioVideoTransform(video);
   video.style.filter = [
     `brightness(${Number(effects.brightness || 1)})`,
     `contrast(${Number(effects.contrast || 1)})`,
     `saturate(${Number(effects.saturation || 1)})`,
   ].join(" ");
+}
+
+function setStudioVideoTransform(video = document.getElementById("studio-video")) {
+  if (!video) return;
+  video.style.transform = `${video.dataset.baseTransform || ""} ${video.dataset.transitionTransform || ""}`.trim();
+}
+
+function applyTransitionPreview(globalTime) {
+  const stage = document.getElementById("studio-stage");
+  const video = document.getElementById("studio-video");
+  const nextVideo = document.getElementById("studio-next-video");
+  if (!stage || !video || !nextVideo) return;
+  const item = transitionItemAtTime(globalTime);
+  if (!item) {
+    stage.dataset.transitionPreview = "none";
+    stage.style.setProperty("--transition-flash-opacity", "0");
+    video.dataset.transitionTransform = "";
+    video.style.opacity = "";
+    nextVideo.dataset.transitionTransform = "";
+    nextVideo.style.opacity = "0";
+    const upcoming = upcomingTransitionItem(globalTime);
+    const upcomingMedia = upcoming ? nextMediaForTransition(upcoming) : null;
+    if (upcomingMedia) {
+      syncTransitionNextVideo(nextVideo, upcomingMedia);
+    } else if (nextVideo.getAttribute("src")) {
+      nextVideo.pause();
+      nextVideo.removeAttribute("src");
+      nextVideo.load();
+    }
+    setStudioVideoTransform(video);
+    setStudioVideoTransform(nextVideo);
+    return;
+  }
+  const duration = Math.max(0.05, item.end_seconds - item.start_seconds);
+  const rawProgress = clamp((globalTime - item.start_seconds) / duration, 0, 1);
+  const progress = easeInOutCubic(rawProgress);
+  const id = normalizedTransitionId(transitionIdForItem(item));
+  const nextMedia = nextMediaForTransition(item);
+  syncTransitionNextVideo(nextVideo, nextMedia);
+  let outOpacity = 1;
+  let inOpacity = progress;
+  let outTransform = "";
+  let inTransform = "";
+  let flashOpacity = 0;
+  if (["fade", "dissolve"].includes(id)) {
+    outOpacity = 1 - progress;
+    inOpacity = progress;
+  } else if (id === "slide_left") {
+    outTransform = `translateX(${-progress * 100}%)`;
+    inTransform = `translateX(${(1 - progress) * 100}%)`;
+    inOpacity = 1;
+  } else if (id === "slide_right") {
+    outTransform = `translateX(${progress * 100}%)`;
+    inTransform = `translateX(${-(1 - progress) * 100}%)`;
+    inOpacity = 1;
+  } else if (id === "slide_up") {
+    outTransform = `translateY(${-progress * 100}%)`;
+    inTransform = `translateY(${(1 - progress) * 100}%)`;
+    inOpacity = 1;
+  } else if (id === "zoom_in") {
+    outTransform = `scale(${1 + progress * 0.22})`;
+    outOpacity = 1 - progress * 0.8;
+    inTransform = `scale(${1.16 - progress * 0.16})`;
+    inOpacity = progress;
+  } else if (id === "zoom_out") {
+    outTransform = `scale(${1 - progress * 0.18})`;
+    outOpacity = 1 - progress * 0.8;
+    inTransform = `scale(${0.88 + progress * 0.12})`;
+    inOpacity = progress;
+  } else if (id === "whip_pan") {
+    outTransform = `translateX(${-progress * 125}%) skewX(${-progress * 9}deg)`;
+    inTransform = `translateX(${(1 - progress) * 125}%) skewX(${(1 - progress) * 9}deg)`;
+    outOpacity = 1 - progress * 0.35;
+    inOpacity = 1;
+  } else if (id === "flash_cut") {
+    flashOpacity = Math.max(0, 1 - Math.abs(rawProgress - 0.5) * 2);
+    outOpacity = rawProgress < 0.5 ? 1 : 0;
+    inOpacity = rawProgress < 0.5 ? 0 : 1;
+  } else {
+    outOpacity = 1 - progress;
+    inOpacity = progress;
+  }
+  stage.dataset.transitionPreview = id || "none";
+  stage.style.setProperty("--transition-flash-opacity", String(flashOpacity));
+  video.dataset.transitionTransform = outTransform;
+  nextVideo.dataset.transitionTransform = inTransform;
+  video.style.opacity = String(outOpacity);
+  nextVideo.style.opacity = nextMedia ? String(inOpacity) : "0";
+  setStudioVideoTransform(video);
+  setStudioVideoTransform(nextVideo);
+}
+
+function transitionItemAtTime(globalTime) {
+  return timelineItems().find((item) => item.type === "transition" && globalTime >= item.start_seconds && globalTime <= item.end_seconds) || null;
+}
+
+function upcomingTransitionItem(globalTime) {
+  return timelineItems()
+    .filter((item) => item.type === "transition" && item.start_seconds > globalTime && item.start_seconds - globalTime <= 1.2)
+    .sort((a, b) => a.start_seconds - b.start_seconds)[0] || null;
+}
+
+function nextMediaForTransition(transitionItem) {
+  const mediaItems = timelineItems().filter((item) => item.type === "media").sort((a, b) => a.start_seconds - b.start_seconds);
+  const index = mediaItems.findIndex((item) => item.scene_id === transitionItem.scene_id);
+  return index >= 0 ? mediaItems[index + 1] || null : null;
+}
+
+function normalizedTransitionId(id) {
+  return {
+    clean_cut: "fade",
+    push_slide: "slide_left",
+    speed_zoom: "zoom_in",
+    fast_swipes: "whip_pan",
+  }[id] || id || "fade";
+}
+
+function easeInOutCubic(value) {
+  const p = clamp(Number(value || 0), 0, 1);
+  return p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+}
+
+function syncTransitionNextVideo(nextVideo, nextMedia) {
+  if (!nextVideo || !nextMedia?.source_ref?.media_url) return;
+  const changed = setPlaybackElementSource(nextVideo, nextMedia.source_ref.media_url);
+  applyStudioMediaEffects(nextVideo, nextMedia);
+  const targetTime = mediaTrimStart(nextMedia);
+  const setTime = () => {
+    const drift = Math.abs(Number(nextVideo.currentTime || 0) - targetTime);
+    if (changed || drift > 0.08 || !state.timelinePlaying) {
+      try {
+        nextVideo.currentTime = targetTime;
+      } catch {
+        return;
+      }
+    }
+    nextVideo.pause();
+  };
+  if (nextVideo.readyState > 0) setTime();
+  else nextVideo.addEventListener("loadedmetadata", setTime, { once: true });
 }
 
 function placeTimelineClip(clip, item) {
@@ -1655,20 +2365,38 @@ function updateTimelineClipActiveStates() {
   });
 }
 
-async function saveStudioText() {
-  const item = selectedItem();
+async function saveStudioText(panel = null, item = selectedItem()) {
   if (!item || item.type !== "text") return;
-  item.source_ref = { ...(item.source_ref || {}), text: document.getElementById("studio-text-input").value.trim() };
-  await patchTimelineItem(item.item_id, { source_ref: item.source_ref });
+  if (panel) applyTextDraftToStage(panel, item);
+  else item.source_ref = { ...(item.source_ref || {}), text: document.getElementById("studio-text-input")?.value.trim() || textForItem(item) };
+  await patchTimelineItem(item.item_id, { source_ref: item.source_ref, style: item.style, transform: item.transform });
 }
 
 function startCanvasTextDrag(event) {
-  const item = selectedItem();
+  const itemId = event.currentTarget.dataset.itemId;
+  const item = timelineItems().find((entry) => entry.item_id === itemId) || selectedItem();
   if (!item || item.type !== "text") return;
   event.preventDefault();
+  state.selectedItemId = item.item_id;
+  state.selectedTool = "text";
   const rect = document.getElementById("studio-stage").getBoundingClientRect();
   dragState = {
     kind: "canvas-text",
+    itemId: item.item_id,
+    rect,
+  };
+}
+
+function startCanvasIconDrag(event) {
+  const item = timelineItems().find((entry) => entry.item_id === event.currentTarget.dataset.iconItemId);
+  if (!item || item.type !== "icon") return;
+  event.preventDefault();
+  event.stopPropagation();
+  state.selectedItemId = item.item_id;
+  state.selectedTool = "icons";
+  const rect = document.getElementById("studio-stage").getBoundingClientRect();
+  dragState = {
+    kind: "canvas-icon",
     itemId: item.item_id,
     rect,
   };
@@ -1714,6 +2442,14 @@ function onPointerMove(event) {
     const y = clamp(((event.clientY - dragState.rect.top) / dragState.rect.height) * 100, 0, 100);
     item.transform = { ...(item.transform || {}), x: Math.round(x), y: Math.round(y) };
     renderStudioStage();
+  }
+  if (dragState.kind === "canvas-icon") {
+    const item = state.timeline.items.find((entry) => entry.item_id === dragState.itemId);
+    if (!item) return;
+    const x = clamp(((event.clientX - dragState.rect.left) / dragState.rect.width) * 100, 0, 100);
+    const y = clamp(((event.clientY - dragState.rect.top) / dragState.rect.height) * 100, 0, 100);
+    item.transform = { ...(item.transform || {}), x: Math.round(x), y: Math.round(y) };
+    renderStudioIcons();
   }
   if (dragState.kind === "timeline") {
     const item = state.timeline.items.find((entry) => entry.item_id === dragState.itemId);
@@ -1884,6 +2620,9 @@ function selectFirstItemForScene(sceneId) {
     media: "media",
     text: "text",
     captions: "caption",
+    overlay: "overlay",
+    transitions: "transition",
+    icons: "icon",
   }[state.selectedTool] || "text";
   const item = timelineItems().find((entry) => entry.scene_id === sceneId && entry.type === preferredType)
     || timelineItems().find((entry) => entry.scene_id === sceneId && entry.type === "media")
@@ -1916,6 +2655,9 @@ function studioToolForItem(item) {
     media: "media",
     text: "text",
     caption: "captions",
+    overlay: "overlay",
+    transition: "transitions",
+    icon: "icons",
   }[item?.type] || null;
 }
 
@@ -1941,6 +2683,7 @@ function toggleStudioPlayback() {
 function playTimelineFrom(globalTime) {
   state.timelinePlaying = true;
   seekTimeline(globalTime, { autoplay: true });
+  startTimelineFrameTicker();
   updateStudioPlaybackButton();
 }
 
@@ -1977,11 +2720,30 @@ function advanceTimelinePlayback(globalTime) {
   seekTimeline(globalTime, { autoplay: true });
 }
 
+function startTimelineFrameTicker() {
+  if (timelineFrameRequest) return;
+  const tick = () => {
+    timelineFrameRequest = null;
+    if (!state.timelinePlaying) return;
+    updateStudioClock();
+    timelineFrameRequest = requestAnimationFrame(tick);
+  };
+  timelineFrameRequest = requestAnimationFrame(tick);
+}
+
+function stopTimelineFrameTicker() {
+  if (!timelineFrameRequest) return;
+  cancelAnimationFrame(timelineFrameRequest);
+  timelineFrameRequest = null;
+}
+
 function updateStudioClock(forcedGlobalTime = null) {
   const media = currentMediaItem();
   const hasForcedTime = typeof forcedGlobalTime === "number" && Number.isFinite(forcedGlobalTime);
   const globalTime = hasForcedTime ? forcedGlobalTime : globalTimeFromVideo(media);
   state.timelinePlayheadSeconds = clamp(globalTime, 0, Math.max(1, state.timeline?.duration_seconds || 1));
+  updateCaptionPreview(state.timelinePlayheadSeconds);
+  applyTransitionPreview(state.timelinePlayheadSeconds);
   const time = document.getElementById("studio-time");
   if (time) time.textContent = state.timeline ? `${formatDuration(state.timelinePlayheadSeconds)} / ${formatDuration(state.timeline.duration_seconds)}` : "0:00";
   updateTimelinePlayhead(state.timelinePlayheadSeconds);
@@ -2021,7 +2783,7 @@ function defaultPreset() {
     scene_media: { media_source: "multi_source", candidate_count: 4, pinterest_candidate_count: 4, translate_to_chinese: true },
     voiceover: { provider: "free_tts", voice_id: "en-US-AriaNeural", language: "en" },
     captions: { enabled: true, style_id: "bold_outline", position: "bottom_safe", animation_id: "word_reveal" },
-    extras: { transition_pack_id: "clean_cut", overlay_pack_id: "caption_shadow", icon_pack_id: "none" },
+    extras: { transition_pack_id: "fade", overlay_pack_id: "caption_shadow", icon_pack_id: "none" },
   };
 }
 
@@ -2070,7 +2832,17 @@ function captionLabel(value) {
 
 function transitionLabel(value) {
   return {
+    none: "None",
     clean_cut: "Clean cut",
+    fade: "Fade",
+    dissolve: "Dissolve",
+    slide_left: "Slide left",
+    slide_right: "Slide right",
+    slide_up: "Slide up",
+    zoom_in: "Zoom in",
+    zoom_out: "Zoom out",
+    whip_pan: "Whip pan",
+    flash_cut: "Flash cut",
     push_slide: "Push slide",
     speed_zoom: "Speed zoom",
     fast_swipes: "Legacy fast swipes",
@@ -2079,9 +2851,13 @@ function transitionLabel(value) {
 
 function overlayLabel(value) {
   return {
+    none: "None",
     caption_shadow: "Caption shadow",
     focus_frame: "Focus frame",
     soft_vignette: "Soft vignette",
+    dim_background: "Dim background",
+    caption_shade: "Caption shade",
+    subtle_grain: "Subtle grain",
     clean_shadow: "Legacy clean shadow",
   }[value] || String(value || "").replaceAll("_", " ");
 }
@@ -2092,6 +2868,8 @@ function itemLabel(item) {
     media: "Video",
     caption: "Captions",
     text: "Text",
+    overlay: "Overlay",
+    icon: "Icon",
     audio: "Voice",
     transition: "Transition",
   }[item.type] || titleCase(item.type);

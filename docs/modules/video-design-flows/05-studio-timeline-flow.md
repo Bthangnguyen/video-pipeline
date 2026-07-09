@@ -14,6 +14,8 @@ Studio must feel like an editor, not a JSON viewer.
 
 Trim selection and render assembly are specified separately in [06 Trim Selection And Render Assembly Flow](06-trim-render-flow.md). Studio should use that flow once material clips need to match TTS duration instead of showing whole raw videos.
 
+Text/caption styling, scene overlays, transitions, and draggable icons are specified separately in [07 Studio Creative Controls Flow](07-studio-creative-controls-flow.md). Studio timeline should provide the selection and persistence foundation for those controls.
+
 ## Route
 
 Preferred future route:

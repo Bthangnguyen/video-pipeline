@@ -147,15 +147,15 @@
               <p class="vd-kicker">Motion template</p>
               <h2>Transitions and overlays</h2>
               <div class="vd-option-grid">
-                <button class="vd-choice is-selected" data-preset-path="extras.transition_pack_id" data-preset-value="clean_cut" type="button">
-                  <strong>Clean cut</strong>
-                  <span>Fast and stable between scenes</span>
+                <button class="vd-choice is-selected" data-preset-path="extras.transition_pack_id" data-preset-value="fade" type="button">
+                  <strong>Soft fade</strong>
+                  <span>Smooth and stable between scenes</span>
                 </button>
-                <button class="vd-choice" data-preset-path="extras.transition_pack_id" data-preset-value="push_slide" type="button">
+                <button class="vd-choice" data-preset-path="extras.transition_pack_id" data-preset-value="slide_left" type="button">
                   <strong>Push slide</strong>
                   <span>Short social swipe motion</span>
                 </button>
-                <button class="vd-choice" data-preset-path="extras.transition_pack_id" data-preset-value="speed_zoom" type="button">
+                <button class="vd-choice" data-preset-path="extras.transition_pack_id" data-preset-value="zoom_in" type="button">
                   <strong>Speed zoom</strong>
                   <span>Quick punch-in on scene changes</span>
                 </button>
@@ -291,6 +291,9 @@
               <button data-studio-tool="media" type="button">Media</button>
               <button data-studio-tool="text" type="button">Text</button>
               <button data-studio-tool="captions" type="button">Captions</button>
+              <button data-studio-tool="overlay" type="button">Overlay</button>
+              <button data-studio-tool="transitions" type="button">Transitions</button>
+              <button data-studio-tool="icons" type="button">Icons</button>
               <button data-studio-tool="settings" type="button">Settings</button>
             </aside>
             <aside id="studio-tool-panel" class="vd-studio-panel"></aside>
@@ -301,9 +304,12 @@
               </div>
               <div id="studio-stage" class="vd-canvas">
                 <video id="studio-video" playsinline muted></video>
+                <video id="studio-next-video" class="vd-next-video" playsinline muted></video>
                 <audio id="studio-audio" preload="auto"></audio>
+                <div id="studio-overlay" class="vd-canvas-overlay"></div>
                 <div id="studio-caption" class="vd-canvas-caption"></div>
                 <div id="studio-text" class="vd-canvas-text" data-draggable-text="true"></div>
+                <div id="studio-icon-layer" class="vd-canvas-icons"></div>
               </div>
             </section>
             <aside id="studio-inspector" class="vd-studio-inspector"></aside>

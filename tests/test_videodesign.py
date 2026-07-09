@@ -952,3 +952,92 @@ def test_videodesign_scene_clip_patch_persists_and_updates_timeline(tmp_path):
     assert short_response.json()["scene"]["clip"]["trim_start_seconds"] == 0
     assert short_response.json()["scene"]["clip"]["trim_end_seconds"] == 2
     assert short_response.json()["scene"]["clip"]["loop_mode"] == "loop_to_fill"
+
+
+def test_videodesign_studio_creative_controls_api(tmp_path):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
+    first_scene_id = plan_response.json()["scenes"][0]["scene_id"]
+
+    project = videodesign_service.store.get(project_id)
+    for index, scene in enumerate(project.scenes):
+        scene.duration_seconds = 3
+        if index < 2:
+            scene.approval_state = "downloaded"
+            asset_path = tmp_path / f"{scene.scene_id}.mp4"
+            asset_path.write_bytes(b"video")
+            asset = MaterialAsset(
+                asset_id=f"mat_{scene.scene_id}",
+                project_id=project_id,
+                scene_id=scene.scene_id,
+                candidate_id=f"cand_{scene.scene_id}",
+                local_path=str(asset_path),
+                duration=8,
+            )
+            project.material_assets.append(asset)
+            scene.material_asset_id = asset.asset_id
+        else:
+            scene.approval_state = "placeholder_allowed"
+    videodesign_service.store.put(project)
+
+    studio_response = client.post(f"/api/videodesign/projects/{project_id}/studio")
+    assert studio_response.status_code == 200
+
+    icon_response = client.post(
+        f"/api/videodesign/projects/{project_id}/timeline/items",
+        json={
+            "scene_id": first_scene_id,
+            "type": "icon",
+            "layer_id": "icon",
+            "start_seconds": 0.5,
+            "end_seconds": 2.2,
+            "source_ref": {"icon_id": "arrow_right"},
+            "transform": {"x": 62, "y": 40, "scale": 1.2},
+            "style": {"color": "#ffffff"},
+        },
+    )
+    assert icon_response.status_code == 200
+    assert icon_response.json()["item"]["type"] == "icon"
+    assert "icon" in icon_response.json()["timeline"]["layers"]
+
+    overlay_response = client.post(
+        f"/api/videodesign/projects/{project_id}/timeline/items",
+        json={
+            "scene_id": first_scene_id,
+            "type": "overlay",
+            "layer_id": "overlay_default",
+            "source_ref": {"overlay_id": "caption_shade"},
+            "style": {"overlay_id": "caption_shade", "opacity": 0.4},
+        },
+    )
+    assert overlay_response.status_code == 200
+    assert overlay_response.json()["item"]["start_seconds"] == 0
+    assert overlay_response.json()["item"]["end_seconds"] == 3
+
+    delete_response = client.delete(
+        f"/api/videodesign/projects/{project_id}/timeline/items/{icon_response.json()['item']['item_id']}"
+    )
+    assert delete_response.status_code == 200
+    assert all(item["item_id"] != icon_response.json()["item"]["item_id"] for item in delete_response.json()["timeline"]["items"])
+
+    transition_response = client.post(
+        f"/api/videodesign/projects/{project_id}/scenes/{first_scene_id}/transition",
+        json={"transition_id": "fade", "duration_seconds": 0.25},
+    )
+    assert transition_response.status_code == 200
+    transition = next(item for item in transition_response.json()["timeline"]["items"] if item["type"] == "transition")
+    assert transition["source_ref"]["transition_id"] == "fade"
+
+    apply_all_response = client.post(
+        f"/api/videodesign/projects/{project_id}/transitions/apply-all",
+        json={"transition_id": "slide_left", "duration_seconds": 0.35},
+    )
+    assert apply_all_response.status_code == 200
+    transitions = [item for item in apply_all_response.json()["timeline"]["items"] if item["type"] == "transition"]
+    assert transitions
+    assert all(item["source_ref"]["transition_id"] == "slide_left" for item in transitions)
+
+    random_response = client.post(f"/api/videodesign/projects/{project_id}/transitions/randomize")
+    assert random_response.status_code == 200
+    assert any(item["type"] == "transition" for item in random_response.json()["timeline"]["items"])

@@ -273,3 +273,19 @@ class TimelineItemPatch(BaseModel):
     source_ref: dict[str, Any] | None = None
     transform: dict[str, Any] | None = None
     style: dict[str, Any] | None = None
+
+
+class TimelineItemCreateRequest(BaseModel):
+    scene_id: str
+    type: Literal["text", "caption", "overlay", "icon", "transition"]
+    layer_id: str | None = None
+    start_seconds: float | None = Field(default=None, ge=0)
+    end_seconds: float | None = Field(default=None, ge=0)
+    source_ref: dict[str, Any] = Field(default_factory=dict)
+    transform: dict[str, Any] = Field(default_factory=dict)
+    style: dict[str, Any] = Field(default_factory=dict)
+
+
+class TransitionRequest(BaseModel):
+    transition_id: str = "fade"
+    duration_seconds: float = Field(default=0.35, ge=0.05, le=1.5)

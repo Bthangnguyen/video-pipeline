@@ -15,7 +15,9 @@ from app.videodesign.schemas import (
     SceneSelectionRequest,
     ScriptGenerateRequest,
     SplitSettings,
+    TimelineItemCreateRequest,
     TimelineItemPatch,
+    TransitionRequest,
     TTSGenerateRequest,
 )
 from app.videodesign.service import videodesign_service
@@ -244,9 +246,49 @@ async def timeline(project_id: str):
         return error_response(error)
 
 
+@router.post("/projects/{project_id}/timeline/items")
+async def create_timeline_item(project_id: str, request: TimelineItemCreateRequest):
+    try:
+        return videodesign_service.create_timeline_item(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
 @router.patch("/projects/{project_id}/timeline/items/{item_id}")
 async def patch_timeline_item(project_id: str, item_id: str, request: TimelineItemPatch):
     try:
         return videodesign_service.patch_timeline_item(project_id, item_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.delete("/projects/{project_id}/timeline/items/{item_id}")
+async def delete_timeline_item(project_id: str, item_id: str):
+    try:
+        return videodesign_service.delete_timeline_item(project_id, item_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/scenes/{scene_id}/transition")
+async def set_scene_transition(project_id: str, scene_id: str, request: TransitionRequest):
+    try:
+        return videodesign_service.set_scene_transition(project_id, scene_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/transitions/apply-all")
+async def apply_all_transitions(project_id: str, request: TransitionRequest):
+    try:
+        return videodesign_service.apply_all_transitions(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/transitions/randomize")
+async def randomize_transitions(project_id: str):
+    try:
+        return videodesign_service.randomize_transitions(project_id)
     except VideoDesignError as error:
         return error_response(error)
