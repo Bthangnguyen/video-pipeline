@@ -28,6 +28,7 @@ from app.videodesign.errors import (
     INVALID_PROJECT_INPUT,
     MATERIAL_SEARCH_FAILED,
     MATERIAL_SEARCH_TIMEOUT,
+    PREVIEW_RENDER_FAILED,
     SCENE_NOT_FOUND,
     SCENE_NOT_READY,
     SCRIPT_GENERATION_FAILED,
@@ -52,6 +53,7 @@ from app.videodesign.schemas import (
     SceneSelectionRequest,
     ScriptGenerateRequest,
     SplitSettings,
+    SmoothPreview,
     TTSGenerateRequest,
     TTSMeta,
     TimelineDraft,
@@ -231,6 +233,7 @@ class VideoDesignService:
         duration = _scene_duration(scene)
         scene.clip = _make_scene_clip(scene, asset, duration, request)
         _sync_scene_clip_to_timeline(project, scene, asset)
+        _mark_preview_stale(project)
         self.store.put(project)
         return {"success": True, "scene": scene.model_dump(), "timeline": project.timeline.model_dump() if project.timeline else None}
 
@@ -331,6 +334,7 @@ class VideoDesignService:
             scene_offsets=offsets,
         )
         project.timeline = None
+        _reset_smooth_preview(project)
         self.store.put(project)
         return {
             "success": True,
@@ -355,6 +359,7 @@ class VideoDesignService:
             deleted += 1
         project.voiceover_track = VoiceoverTrack()
         project.timeline = None
+        _reset_smooth_preview(project)
         self.store.put(project)
         return {
             "success": True,
@@ -413,6 +418,7 @@ class VideoDesignService:
         )
         if project.timeline:
             project.timeline.duration_seconds = round(combined_duration, 3)
+            _mark_preview_stale(project)
         self.store.put(project)
         return {"success": True, "voiceover_track": project.voiceover_track.model_dump()}
 
@@ -905,6 +911,7 @@ class VideoDesignService:
             items=items,
         )
         project.timeline = timeline
+        _mark_preview_stale(project)
         self.store.put(project)
         return {"success": True, "timeline": timeline.model_dump()}
 
@@ -915,8 +922,55 @@ class VideoDesignService:
     def clear_timeline(self, project_id: str) -> dict:
         project = self.store.get(project_id)
         project.timeline = None
+        _reset_smooth_preview(project)
         self.store.put(project)
         return {"success": True, "project_id": project.project_id, "timeline": None}
+
+    def preview_status(self, project_id: str) -> dict:
+        project = self.store.get(project_id)
+        return {"success": True, "preview": project.smooth_preview.model_dump()}
+
+    async def render_smooth_preview(self, project_id: str) -> dict:
+        project = self.store.get(project_id)
+        if not project.timeline:
+            raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
+        project.smooth_preview.status = "rendering"
+        project.smooth_preview.error = {}
+        self.store.put(project)
+        try:
+            path = await _render_smooth_preview_file(project)
+        except VideoDesignError as error:
+            project.smooth_preview.status = "failed"
+            project.smooth_preview.error = error.to_payload()
+            self.store.put(project)
+            raise
+        except Exception as exc:
+            error = VideoDesignError(PREVIEW_RENDER_FAILED, f"Could not render smooth preview: {exc}", retryable=True)
+            project.smooth_preview.status = "failed"
+            project.smooth_preview.error = error.to_payload()
+            self.store.put(project)
+            raise error from exc
+
+        updated_at = datetime.now(timezone.utc).isoformat()
+        project.smooth_preview = SmoothPreview(
+            status="ready",
+            preview_url=_smooth_preview_url(project.project_id, updated_at),
+            preview_path=str(path),
+            timeline_id=project.timeline.timeline_id,
+            duration_seconds=project.timeline.duration_seconds,
+            updated_at=updated_at,
+        )
+        self.store.put(project)
+        return {"success": True, "preview": project.smooth_preview.model_dump()}
+
+    def smooth_preview_file_path(self, project_id: str) -> Path:
+        project = self.store.get(project_id)
+        if project.smooth_preview.status not in {"ready", "stale"} or not project.smooth_preview.preview_path:
+            raise VideoDesignError(PREVIEW_RENDER_FAILED, "Smooth preview has not been rendered yet.", retryable=True)
+        path = Path(project.smooth_preview.preview_path)
+        if not path.exists():
+            raise VideoDesignError(PREVIEW_RENDER_FAILED, "Smooth preview file does not exist.", retryable=True)
+        return path
 
     def material_file_path(self, project_id: str, asset_id: str) -> str:
         project = self.store.get(project_id)
@@ -952,6 +1006,7 @@ class VideoDesignService:
         if layer_id not in project.timeline.layers:
             project.timeline.layers.append(layer_id)
         project.timeline.items.append(item)
+        _mark_preview_stale(project)
         self.store.put(project)
         return {"success": True, "item": item.model_dump(), "timeline": project.timeline.model_dump()}
 
@@ -977,6 +1032,7 @@ class VideoDesignService:
                     item.transform = patch.transform
                 if patch.style is not None:
                     item.style = patch.style
+                _mark_preview_stale(project)
                 self.store.put(project)
                 return {"success": True, "item": item.model_dump()}
         raise VideoDesignError(SCENE_NOT_FOUND, "Timeline item does not exist.")
@@ -989,6 +1045,7 @@ class VideoDesignService:
         project.timeline.items = [item for item in project.timeline.items if item.item_id != item_id]
         if len(project.timeline.items) == before:
             raise VideoDesignError(SCENE_NOT_FOUND, "Timeline item does not exist.")
+        _mark_preview_stale(project)
         self.store.put(project)
         return {"success": True, "timeline": project.timeline.model_dump()}
 
@@ -997,6 +1054,7 @@ class VideoDesignService:
         if not project.timeline:
             raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
         _set_transition_for_scene(project, scene_id, request.transition_id, request.duration_seconds)
+        _mark_preview_stale(project)
         self.store.put(project)
         return {"success": True, "timeline": project.timeline.model_dump()}
 
@@ -1006,6 +1064,7 @@ class VideoDesignService:
             raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
         for scene_id in _transitionable_scene_ids(project):
             _set_transition_for_scene(project, scene_id, request.transition_id, request.duration_seconds)
+        _mark_preview_stale(project)
         self.store.put(project)
         return {"success": True, "timeline": project.timeline.model_dump()}
 
@@ -1017,6 +1076,7 @@ class VideoDesignService:
         for index, scene_id in enumerate(_transitionable_scene_ids(project)):
             transition_id = choices[index % len(choices)]
             _set_transition_for_scene(project, scene_id, transition_id, 0.35)
+        _mark_preview_stale(project)
         self.store.put(project)
         return {"success": True, "timeline": project.timeline.model_dump()}
 
@@ -1298,6 +1358,256 @@ def source_label(source: str) -> str:
         "douyinsearch": "Douyin",
         "pinterestsearch": "Pinterest",
     }.get(source, source)
+
+
+def _mark_preview_stale(project: VideoDesignProject) -> None:
+    preview = project.smooth_preview
+    if preview.preview_path and Path(preview.preview_path).exists():
+        preview.status = "stale"
+    else:
+        preview.status = "missing"
+        preview.preview_url = ""
+        preview.preview_path = ""
+    if project.timeline:
+        preview.timeline_id = project.timeline.timeline_id
+
+
+def _reset_smooth_preview(project: VideoDesignProject) -> None:
+    _delete_project_file(project, project.smooth_preview.preview_path)
+    project.smooth_preview = SmoothPreview()
+
+
+def _smooth_preview_url(project_id: str, updated_at: str) -> str:
+    cache_key = re.sub(r"[^0-9A-Za-z]", "", updated_at) or uuid.uuid4().hex
+    return f"/api/videodesign/projects/{project_id}/preview/file?v={cache_key}"
+
+
+async def _render_smooth_preview_file(project: VideoDesignProject) -> Path:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise VideoDesignError(PREVIEW_RENDER_FAILED, "FFmpeg is not available for smooth preview rendering.", retryable=True)
+    if not project.timeline:
+        raise VideoDesignError(SCENE_NOT_READY, "Timeline has not been created.")
+
+    media_items = sorted(
+        [item for item in project.timeline.items if item.type == "media"],
+        key=lambda item: item.start_seconds,
+    )
+    if not media_items:
+        raise VideoDesignError(SCENE_NOT_READY, "Timeline has no media items to render.")
+
+    for item in media_items:
+        asset = _asset(project, str(item.source_ref.get("asset_id") or ""))
+        await _ensure_preview_proxy(asset, project.aspect_ratio)
+
+    output_dir = settings.storage_dir / project.project_id / "previews"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "timeline_preview.mp4"
+    temp_path = output_dir / f"timeline_preview.{uuid.uuid4().hex}.tmp.mp4"
+
+    transition_by_scene: dict[str, TimelineItem] = {}
+    for item in project.timeline.items:
+        if item.type != "transition":
+            continue
+        transition_id = item.style.get("transition_id") or item.source_ref.get("transition_id")
+        if transition_id and transition_id != "none":
+            transition_by_scene[item.scene_id] = item
+    command = [ffmpeg, "-y"]
+    width, height = _proxy_resolution(project.aspect_ratio)
+    incoming_transition = 0.0
+    input_durations: list[float] = []
+    input_trim_starts: list[float] = []
+    for index, item in enumerate(media_items):
+        asset = _asset(project, str(item.source_ref.get("asset_id") or ""))
+        input_path = Path(asset.proxy_path or asset.local_path)
+        has_video_stream = await _has_video_stream(input_path)
+        if not input_path.exists():
+            raise VideoDesignError(PREVIEW_RENDER_FAILED, f"Media file does not exist for scene {item.scene_id}.", retryable=True)
+        scene_duration = max(TIMELINE_MIN_ITEM_DURATION, float(item.end_seconds - item.start_seconds))
+        input_duration = scene_duration + (incoming_transition if index > 0 else 0)
+        input_durations.append(input_duration)
+        if has_video_stream:
+            input_trim_starts.append(max(0.0, float(item.source_ref.get("trim_start_seconds") or 0)))
+            command.extend(["-stream_loop", "-1", "-i", str(input_path)])
+        else:
+            input_trim_starts.append(0.0)
+            command.extend(
+                [
+                    "-f",
+                    "lavfi",
+                    "-t",
+                    _ffmpeg_seconds(input_duration),
+                    "-i",
+                    f"color=c=black:s={width}x{height}:r=30",
+                ]
+            )
+        transition = transition_by_scene.get(item.scene_id)
+        incoming_transition = _transition_duration_for_render(transition, scene_duration) if transition else 0.0
+
+    audio_input_index: int | None = None
+    if project.voiceover_track.audio_path and Path(project.voiceover_track.audio_path).exists():
+        audio_input_index = len(media_items)
+        command.extend(["-i", str(Path(project.voiceover_track.audio_path))])
+
+    filter_parts: list[str] = []
+    for index, item in enumerate(media_items):
+        filter_parts.append(_media_render_filter(index, item, input_durations[index], width, height, input_trim_starts[index]))
+
+    chain = "v0"
+    for index, item in enumerate(media_items[:-1]):
+        transition = transition_by_scene.get(item.scene_id)
+        next_label = f"v{index + 1}"
+        output_label = f"x{index}"
+        if transition:
+            scene_duration = max(TIMELINE_MIN_ITEM_DURATION, float(item.end_seconds - item.start_seconds))
+            duration = _transition_duration_for_render(transition, scene_duration)
+            offset = max(0.0, float(item.end_seconds) - duration)
+            transition_id = _ffmpeg_transition_id(transition)
+            filter_parts.append(
+                f"[{chain}][{next_label}]xfade=transition={transition_id}:duration={_ffmpeg_seconds(duration)}:"
+                f"offset={_ffmpeg_seconds(offset)},format=yuv420p[{output_label}]"
+            )
+        else:
+            filter_parts.append(f"[{chain}][{next_label}]concat=n=2:v=1:a=0,setpts=PTS-STARTPTS,format=yuv420p[{output_label}]")
+        chain = output_label
+
+    duration = max(TIMELINE_MIN_ITEM_DURATION, float(project.timeline.duration_seconds or media_items[-1].end_seconds))
+    command.extend(["-filter_complex", ";".join(filter_parts), "-map", f"[{chain}]"])
+    if audio_input_index is not None:
+        command.extend(["-map", f"{audio_input_index}:a:0", "-c:a", "aac", "-b:a", "160k"])
+    else:
+        command.append("-an")
+    command.extend(
+        [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-t",
+            _ffmpeg_seconds(duration),
+            str(temp_path),
+        ]
+    )
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    timeout = max(180.0, duration * 10)
+    try:
+        _, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.communicate()
+        if temp_path.exists():
+            temp_path.unlink()
+        raise VideoDesignError(PREVIEW_RENDER_FAILED, "Smooth preview render timed out.", retryable=True) from exc
+
+    if process.returncode != 0 or not temp_path.exists():
+        if temp_path.exists():
+            temp_path.unlink()
+        message = (stderr or b"").decode(errors="ignore").strip()[-1400:]
+        raise VideoDesignError(PREVIEW_RENDER_FAILED, f"FFmpeg smooth preview render failed: {message}", retryable=True)
+
+    if output_path.exists():
+        output_path.unlink()
+    temp_path.replace(output_path)
+    return output_path
+
+
+async def _has_video_stream(path: Path) -> bool:
+    if not path.exists():
+        return False
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return True
+    process = await asyncio.create_subprocess_exec(
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "csv=p=0",
+        str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=20)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        return False
+    return process.returncode == 0 and "video" in stdout.decode(errors="ignore").lower()
+
+
+def _media_render_filter(index: int, item: TimelineItem, duration: float, width: int, height: int, trim_start: float | None = None) -> str:
+    trim_start = max(0.0, float(item.source_ref.get("trim_start_seconds") if trim_start is None else trim_start) or 0)
+    filters = [
+        f"trim=start={_ffmpeg_seconds(trim_start)}:duration={_ffmpeg_seconds(duration)}",
+        "setpts=PTS-STARTPTS",
+    ]
+    if item.transform.get("flip_horizontal"):
+        filters.append("hflip")
+    filters.extend(
+        [
+            f"scale={width}:{height}:force_original_aspect_ratio=increase",
+            f"crop={width}:{height}",
+            "fps=30",
+        ]
+    )
+    effects = item.source_ref.get("effects") or {}
+    eq = _eq_filter(effects)
+    if eq:
+        filters.append(eq)
+    filters.append("format=yuv420p")
+    return f"[{index}:v]{','.join(filters)}[v{index}]"
+
+
+def _eq_filter(effects: dict) -> str:
+    brightness = max(-1.0, min(1.0, float(effects.get("brightness", 1) or 1) - 1))
+    contrast = max(0.0, min(4.0, float(effects.get("contrast", 1) or 1)))
+    saturation = max(0.0, min(3.0, float(effects.get("saturation", 1) or 1)))
+    if abs(brightness) < 0.001 and abs(contrast - 1) < 0.001 and abs(saturation - 1) < 0.001:
+        return ""
+    return f"eq=brightness={brightness:.4f}:contrast={contrast:.4f}:saturation={saturation:.4f}"
+
+
+def _transition_duration_for_render(item: TimelineItem | None, scene_duration: float) -> float:
+    if not item:
+        return 0.0
+    raw = item.style.get("duration_seconds") or item.source_ref.get("duration_seconds") or (item.end_seconds - item.start_seconds)
+    return round(max(0.05, min(float(raw or 0.35), scene_duration - 0.05, 1.5)), 3)
+
+
+def _ffmpeg_transition_id(item: TimelineItem) -> str:
+    transition_id = item.style.get("transition_id") or item.source_ref.get("transition_id") or "fade"
+    return {
+        "clean_cut": "fade",
+        "fade": "fade",
+        "dissolve": "dissolve",
+        "slide_left": "slideleft",
+        "slide_right": "slideright",
+        "slide_up": "slideup",
+        "zoom_in": "zoomin",
+        "zoom_out": "fade",
+        "whip_pan": "smoothleft",
+        "flash_cut": "fadewhite",
+    }.get(str(transition_id), "fade")
+
+
+def _ffmpeg_seconds(value: float) -> str:
+    return f"{max(0.0, float(value)):.3f}"
 
 
 async def _create_preview_proxy(asset: MaterialAsset, aspect_ratio: str) -> Path | None:

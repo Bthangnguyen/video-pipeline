@@ -65,15 +65,59 @@ Important limitation:
 - it does not solve browser realtime preview directly
 - its slide implementation intentionally uses a black background, which explains why copying it directly can still produce black-frame-looking transitions
 
-Decision for this project:
+Updated decision for this project:
 
 - use MoneyPrinterTurbo's stable render architecture: normalize -> render intermediate clips -> concat/mix audio
 - do not copy its transition behavior as-is for Studio preview
-- final target should use dual-buffer browser preview and FFmpeg overlap transitions for export
+- dual-buffer browser preview is acceptable only as a lightweight interactive approximation
+- the reliable "watch the finished video" preview must be a rendered smooth preview MP4 using FFmpeg overlap transitions
 
 ## Proposed Solution
 
-### 1. Smooth Studio Transition Preview
+### 1. Smooth Rendered Preview Cache
+
+For transition playback quality, the main Studio preview should not depend on two independent `<video>` elements switching, seeking, and compositing in realtime. That approach can reduce visible stutter but cannot eliminate it because the browser may still decode, seek, or promote frames at slightly different moments.
+
+Create a timeline preview render:
+
+```text
+timeline items + material proxies + global voiceover
+-> FFmpeg render graph
+-> storage/videodesign/{project_id}/previews/timeline_preview.mp4
+-> Studio preview player
+```
+
+Behavior:
+
+- "Build smooth preview" renders the current timeline to one preview MP4.
+- Studio uses that single MP4 for playback when it is available and not stale.
+- The existing dual-buffer preview remains useful while editing before the smooth preview is built.
+- Any timeline edit that changes media, trims, transitions, caption timing, overlays, icons, or voiceover marks the smooth preview as stale.
+- The user can keep editing realtime overlays/captions on top of the preview, but the authoritative smooth playback is refreshed by rebuilding the preview.
+
+Why this is the target:
+
+- one `<video>` element removes cross-element decode/sync issues
+- FFmpeg `xfade` handles actual overlap transitions
+- material proxies give consistent codec, FPS, resolution, keyframes, and pixel format
+- the preview path becomes much closer to the future export path
+
+Realtime editing model:
+
+- timeline item selection, drag, trim inputs, caption drag, icon drag, and playhead scrub stay realtime
+- while editing, the stage may show the current approximate preview immediately
+- after an edit, the smooth preview is marked stale
+- rebuilding preview produces the artifact used for judging transition smoothness
+- autosave can be immediate; preview rendering is explicit in V1 and can become queued/debounced later
+
+Acceptance criteria:
+
+- smooth preview plays through scene boundaries without visible browser element swap stutter
+- smooth preview audio is continuous and aligned with the global voiceover timeline
+- stale state is visible after timeline edits
+- rebuilding preview updates the MP4 and clears stale state
+
+### 2. Lightweight Dual-Buffer Studio Preview
 
 Use dual video buffers:
 
@@ -113,8 +157,9 @@ Acceptance criteria:
 - transition boundary does not show a black frame
 - transition boundary does not show a stale frame from a previous scene
 - if next video is not ready, preview falls back cleanly instead of glitching
+- remaining micro-stutter is acceptable here because the rendered smooth preview is the quality gate
 
-### 2. Preview Proxy For Material Assets
+### 3. Preview Proxy For Material Assets
 
 Create a normalized preview proxy after material download or before Studio:
 
@@ -145,7 +190,7 @@ Acceptance criteria:
 - scrub to random time updates video within roughly `0.3-0.5s`
 - transition preview uses proxy files, not raw downloaded files
 
-### 3. Final Render Transition Model
+### 4. Final Render Transition Model
 
 For export/render, use FFmpeg overlap transitions instead of browser CSS approximation:
 
@@ -176,7 +221,7 @@ Acceptance criteria:
 - rendered transition duration matches Studio timeline metadata
 - audio is one continuous voiceover track from start to end
 
-### 4. Draggable Caption Canvas
+### 5. Draggable Caption Canvas
 
 Treat caption as a real draggable canvas item, like text/icon:
 
@@ -220,7 +265,7 @@ Acceptance criteria:
 - user can apply caption position/style to all scenes
 - active word glow is visible without making inactive words unreadable
 
-### 5. Draggable Timeline Playhead
+### 6. Draggable Timeline Playhead
 
 Make the playhead itself a pointer target:
 
@@ -249,12 +294,15 @@ Acceptance criteria:
 
 ## Implementation Order
 
-1. Add preview proxy generation and prefer proxy media in Studio.
-2. Rework transition preview to dual-buffer with safe fallbacks.
-3. Add draggable playhead scrub.
-4. Add draggable caption transform.
-5. Add caption style scope controls and active-word glow.
-6. Add final render transition mapping with FFmpeg `xfade`.
+1. Ensure preview proxy generation works for old and new materials.
+2. Add smooth preview render job and preview status/stale metadata.
+3. Render timeline preview MP4 with FFmpeg `xfade` and global voiceover.
+4. Let Studio switch between realtime approximate preview and smooth rendered preview.
+5. Keep dual-buffer preview as a fast editing approximation.
+6. Add draggable playhead scrub.
+7. Add draggable caption transform.
+8. Add caption style scope controls and active-word glow.
+9. Reuse the smooth preview render graph as the base for final export.
 
 ## Non-Goals For This Pass
 
@@ -262,11 +310,12 @@ Acceptance criteria:
 - no automatic best-shot selection
 - no full export UI redesign
 - no transition marketplace or large preset library
-- no frame-perfect browser compositor
+- no frame-perfect browser compositor; smooth playback comes from rendered preview MP4
 
 ## Notes For Current Codebase
 
 - Global TTS is now the correct source of truth for time.
 - Studio preview should continue reading `audio.currentTime` as the primary playhead.
-- Current transition code should be treated as a visual approximation until dual-buffer/proxy exists.
+- Current transition code should be treated as a visual approximation even with dual-buffer/proxy.
+- Transition quality should be judged on the rendered smooth preview, not only on browser realtime compositing.
 - MoneyPrinterTurbo is a strong reference for stable preprocessing and render assembly, but not for realtime Studio transition UX.

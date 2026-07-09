@@ -1986,6 +1986,25 @@ textarea {
   font-size: 12px;
 }
 
+.vd-preview-state {
+  align-self: center;
+  max-width: 220px;
+  color: #8da0b8;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vd-preview-state[data-status="ready"] {
+  color: #3ce6ac;
+}
+
+.vd-preview-state[data-status="stale"],
+.vd-preview-state[data-status="failed"] {
+  color: #ffb86b;
+}
+
 .vd-studio-pro .vd-canvas {
   align-self: center;
   justify-self: center;

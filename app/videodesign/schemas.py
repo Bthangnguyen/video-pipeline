@@ -171,6 +171,16 @@ class TimelineDraft(BaseModel):
     items: list[TimelineItem] = Field(default_factory=list)
 
 
+class SmoothPreview(BaseModel):
+    status: Literal["missing", "rendering", "ready", "stale", "failed"] = "missing"
+    preview_url: str = ""
+    preview_path: str = ""
+    timeline_id: str = ""
+    duration_seconds: float = 0
+    updated_at: str = ""
+    error: dict[str, Any] = Field(default_factory=dict)
+
+
 class ProjectProgress(BaseModel):
     stage: str = "idle"
     message: str = ""
@@ -205,6 +215,7 @@ class VideoDesignProject(BaseModel):
     candidates: list[MediaCandidate] = Field(default_factory=list)
     material_assets: list[MaterialAsset] = Field(default_factory=list)
     timeline: TimelineDraft | None = None
+    smooth_preview: SmoothPreview = Field(default_factory=SmoothPreview)
     voiceover_track: VoiceoverTrack = Field(default_factory=VoiceoverTrack)
     progress: ProjectProgress = Field(default_factory=ProjectProgress)
     created_at: str

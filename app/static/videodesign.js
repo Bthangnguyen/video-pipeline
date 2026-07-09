@@ -7,6 +7,8 @@ const state = {
   selectedSceneId: "",
   selectedItemId: "",
   previewCandidateId: "",
+  smoothPreview: defaultSmoothPreview(),
+  previewMode: "realtime",
   materialHealth: null,
   materialCoverCache: {},
   selectedTool: "script",
@@ -119,12 +121,11 @@ function bindEvents() {
 
   document.getElementById("create-timeline").addEventListener("click", createTimeline);
   document.getElementById("clear-timeline").addEventListener("click", clearTimeline);
+  document.getElementById("build-smooth-preview").addEventListener("click", buildSmoothPreview);
+  document.getElementById("toggle-smooth-preview").addEventListener("click", toggleSmoothPreviewMode);
   document.getElementById("studio-play").addEventListener("click", toggleStudioPlayback);
-  document.getElementById("studio-video").addEventListener("timeupdate", onStudioVideoTimeUpdate);
-  document.getElementById("studio-video").addEventListener("loadedmetadata", updateStudioClock);
-  document.getElementById("studio-video").addEventListener("ended", onStudioVideoEnded);
-  document.getElementById("studio-video").addEventListener("play", updateStudioPlaybackButton);
-  document.getElementById("studio-video").addEventListener("pause", updateStudioPlaybackButton);
+  bindStudioVideoEvents(document.getElementById("studio-video"));
+  bindStudioVideoEvents(document.getElementById("studio-next-video"));
   document.getElementById("studio-audio").addEventListener("timeupdate", onStudioAudioTimeUpdate);
   document.getElementById("studio-audio").addEventListener("play", updateStudioPlaybackButton);
   document.getElementById("studio-audio").addEventListener("pause", updateStudioPlaybackButton);
@@ -145,6 +146,15 @@ function bindEvents() {
   document.getElementById("studio-caption").addEventListener("pointerdown", startCanvasCaptionDrag);
   document.addEventListener("pointermove", onPointerMove);
   document.addEventListener("pointerup", endPointerDrag);
+}
+
+function bindStudioVideoEvents(video) {
+  if (!video) return;
+  video.addEventListener("timeupdate", onStudioVideoTimeUpdate);
+  video.addEventListener("loadedmetadata", updateStudioClock);
+  video.addEventListener("ended", onStudioVideoEnded);
+  video.addEventListener("play", updateStudioPlaybackButton);
+  video.addEventListener("pause", updateStudioPlaybackButton);
 }
 
 async function restoreProject() {
@@ -186,6 +196,7 @@ async function loadProject(projectId, preferredView = null) {
     state.project = data.project;
     state.projectId = data.project.project_id;
     state.preset = mergePreset(defaultPreset(), state.project.design_preset || {});
+    state.smoothPreview = state.project.smooth_preview || defaultSmoothPreview();
     localStorage.setItem("videodesignProjectId", state.projectId);
     hydrateProjectFields();
     await loadReview();
@@ -303,6 +314,8 @@ async function generateTts() {
       state.project.voiceover_track = data.voiceover_track;
     }
     state.timeline = null;
+    state.smoothPreview = defaultSmoothPreview();
+    state.previewMode = "realtime";
     await loadReview();
     setStatus("Project voiceover generated as one continuous track.", "idle");
   });
@@ -329,6 +342,8 @@ async function clearGeneratedTts() {
     const data = await api(`/api/videodesign/projects/${state.projectId}/tts`, { method: "DELETE" });
     state.project = data.project;
     state.timeline = null;
+    state.smoothPreview = defaultSmoothPreview();
+    state.previewMode = "realtime";
     state.selectedItemId = "";
     await loadReview();
     setStatus(`Cleared generated TTS audio (${data.deleted_files || 0} file(s)).`, "idle");
@@ -349,11 +364,23 @@ async function loadTimeline() {
   if (!state.projectId) return;
   const data = await api(`/api/videodesign/projects/${state.projectId}/timeline`);
   state.timeline = data.timeline;
+  await loadSmoothPreview({ render: false });
   if (state.timeline && !state.selectedItemId) {
     const firstText = state.timeline.items.find((item) => item.type === "text");
     state.selectedItemId = firstText?.item_id || state.timeline.items[0]?.item_id || "";
   }
   renderAll();
+}
+
+async function loadSmoothPreview(options = {}) {
+  if (!state.projectId) return defaultSmoothPreview();
+  const data = await api(`/api/videodesign/projects/${state.projectId}/preview`);
+  state.smoothPreview = data.preview || defaultSmoothPreview();
+  if (!smoothPreviewUsable() && state.previewMode === "smooth") {
+    state.previewMode = "realtime";
+  }
+  if (options.render !== false) renderStudio();
+  return state.smoothPreview;
 }
 
 async function saveSelectedScene() {
@@ -609,6 +636,7 @@ async function createTimeline() {
     }
     const data = await api(`/api/videodesign/projects/${state.projectId}/studio`, { method: "POST" });
     state.timeline = data.timeline;
+    await loadSmoothPreview({ render: false });
     const firstMedia = state.timeline.items.find((item) => item.type === "media");
     state.selectedItemId = firstMedia?.item_id || state.timeline.items[0]?.item_id || "";
     if (firstMedia) {
@@ -628,11 +656,47 @@ async function clearTimeline() {
     pauseStudioMedia();
     await api(`/api/videodesign/projects/${state.projectId}/timeline`, { method: "DELETE" });
     state.timeline = null;
+    state.smoothPreview = defaultSmoothPreview();
+    state.previewMode = "realtime";
     state.selectedItemId = "";
     state.timelinePlayheadSeconds = 0;
     renderStudio();
     setStatus("Timeline cleared. You can create it again from the current materials.", "idle");
   });
+}
+
+async function buildSmoothPreview() {
+  ensureProject();
+  if (!state.timeline) throw new Error("Create a Studio timeline first.");
+  await run("Rendering smooth preview", async () => {
+    state.timelinePlaying = false;
+    pauseStudioMedia();
+    state.smoothPreview = { ...(state.smoothPreview || defaultSmoothPreview()), status: "rendering", error: {} };
+    renderSmoothPreviewControls();
+    const data = await api(`/api/videodesign/projects/${state.projectId}/preview/render`, { method: "POST" });
+    state.smoothPreview = data.preview || defaultSmoothPreview();
+    state.previewMode = smoothPreviewUsable() ? "smooth" : "realtime";
+    seekTimeline(state.timelinePlayheadSeconds || 0);
+    setStatus("Smooth preview rendered.", "idle");
+  });
+}
+
+function toggleSmoothPreviewMode() {
+  if (state.previewMode === "smooth") {
+    state.previewMode = "realtime";
+    state.timelinePlaying = false;
+    pauseStudioMedia();
+    renderStudio();
+    return;
+  }
+  if (!smoothPreviewUsable()) {
+    setStatus("Build smooth preview first.", "error");
+    return;
+  }
+  state.previewMode = "smooth";
+  state.timelinePlaying = false;
+  pauseStudioMedia();
+  renderStudio();
 }
 
 function rowHasApprovedCandidate(row) {
@@ -1081,6 +1145,7 @@ function previewCandidate(candidateId) {
 }
 
 function renderStudio() {
+  renderSmoothPreviewControls();
   renderStudioToolPanel();
   renderStudioStage();
   renderStudioInspector();
@@ -1088,6 +1153,58 @@ function renderStudio() {
   document.querySelectorAll("[data-studio-tool]").forEach((button) => {
     button.dataset.active = button.dataset.studioTool === state.selectedTool ? "true" : "false";
   });
+}
+
+function defaultSmoothPreview() {
+  return { status: "missing", preview_url: "", preview_path: "", timeline_id: "", duration_seconds: 0, updated_at: "", error: {} };
+}
+
+function smoothPreviewUsable() {
+  return ["ready", "stale"].includes(state.smoothPreview?.status) && Boolean(state.smoothPreview?.preview_url);
+}
+
+function smoothPreviewActive() {
+  return state.previewMode === "smooth" && smoothPreviewUsable();
+}
+
+function markSmoothPreviewStale() {
+  if (!state.smoothPreview?.preview_url) {
+    state.smoothPreview = defaultSmoothPreview();
+    state.previewMode = "realtime";
+    return;
+  }
+  if (state.smoothPreview.status === "ready") {
+    state.smoothPreview = { ...state.smoothPreview, status: "stale" };
+  }
+}
+
+function renderSmoothPreviewControls() {
+  const build = document.getElementById("build-smooth-preview");
+  const toggle = document.getElementById("toggle-smooth-preview");
+  const label = document.getElementById("smooth-preview-status");
+  const preview = state.smoothPreview || defaultSmoothPreview();
+  if (build) {
+    build.disabled = !state.timeline || preview.status === "rendering" || state.running;
+    build.textContent = preview.status === "rendering" ? "Rendering..." : preview.status === "ready" ? "Rebuild smooth preview" : "Build smooth preview";
+  }
+  if (toggle) {
+    toggle.disabled = !smoothPreviewUsable();
+    toggle.dataset.active = smoothPreviewActive() ? "true" : "false";
+    toggle.textContent = smoothPreviewActive() ? "Use realtime preview" : "Use smooth preview";
+  }
+  if (label) {
+    label.dataset.status = preview.status || "missing";
+    label.textContent = smoothPreviewStatusLabel(preview);
+  }
+}
+
+function smoothPreviewStatusLabel(preview) {
+  const status = preview?.status || "missing";
+  if (status === "ready") return `Smooth ready ${formatDuration(preview.duration_seconds || state.timeline?.duration_seconds || 0)}`;
+  if (status === "stale") return "Smooth stale - rebuild";
+  if (status === "rendering") return "Rendering smooth preview";
+  if (status === "failed") return preview?.error?.message || "Smooth preview failed";
+  return "Preview missing";
 }
 
 function renderStudioToolPanel() {
@@ -1188,7 +1305,11 @@ function renderCaptionStylePanel(panel, row) {
       <button id="apply-caption-all" type="button">Apply all scenes</button>
     </div>
   `;
-  panel.querySelectorAll("input, select").forEach((input) => input.addEventListener("input", () => applyCaptionDraftToStage(panel, item)));
+  panel.querySelectorAll("input, select").forEach((input) => {
+    const applyDraft = () => applyCaptionDraftToStage(panel, item);
+    input.addEventListener("input", applyDraft);
+    input.addEventListener("change", applyDraft);
+  });
   panel.querySelector("#save-caption-style")?.addEventListener("click", () => saveCaptionStyle(panel, item));
   panel.querySelector("#apply-caption-all")?.addEventListener("click", () => applyCaptionStyleAll(panel, item));
   applyCaptionDraftToStage(panel, item);
@@ -1448,6 +1569,7 @@ async function upsertOverlayForScene(sceneId, overlayId, opacity) {
       body: patch,
     });
     replaceTimelineItem(data.item);
+    markSmoothPreviewStale();
     return;
   }
   const bounds = sceneBounds(sceneId);
@@ -1463,6 +1585,7 @@ async function upsertOverlayForScene(sceneId, overlayId, opacity) {
     },
   });
   state.timeline = data.timeline;
+  markSmoothPreviewStale();
 }
 
 function _transitionHasNextScene(sceneId) {
@@ -1480,6 +1603,7 @@ async function saveSelectedTransition(sceneId) {
       },
     });
     state.timeline = data.timeline;
+    markSmoothPreviewStale();
   });
 }
 
@@ -1493,6 +1617,7 @@ async function saveAllTransitions(transitionId) {
       },
     });
     state.timeline = data.timeline;
+    markSmoothPreviewStale();
   });
 }
 
@@ -1500,6 +1625,7 @@ async function randomizeTransitions() {
   await run("Randomizing transitions", async () => {
     const data = await api(`/api/videodesign/projects/${state.projectId}/transitions/randomize`, { method: "POST" });
     state.timeline = data.timeline;
+    markSmoothPreviewStale();
   });
 }
 
@@ -1522,6 +1648,7 @@ async function addIconToScene(sceneId, iconId) {
       },
     });
     state.timeline = data.timeline;
+    markSmoothPreviewStale();
     state.selectedItemId = data.item.item_id;
     state.selectedTool = "icons";
   });
@@ -1548,6 +1675,7 @@ async function deleteTimelineItem(itemId, rerender = true) {
   if (!itemId) return;
   const data = await api(`/api/videodesign/projects/${state.projectId}/timeline/items/${itemId}`, { method: "DELETE" });
   state.timeline = data.timeline;
+  markSmoothPreviewStale();
   if (state.selectedItemId === itemId) state.selectedItemId = "";
   if (rerender) renderStudio();
 }
@@ -1753,7 +1881,10 @@ async function saveSceneClip(panel, media, row, trimSource) {
       },
     });
     replaceScene(data.scene);
-    if (data.timeline) state.timeline = data.timeline;
+    if (data.timeline) {
+      state.timeline = data.timeline;
+      markSmoothPreviewStale();
+    }
   });
 }
 
@@ -1814,40 +1945,69 @@ function renderStudioStage() {
   const stage = document.getElementById("studio-stage");
   const sceneLabel = document.getElementById("studio-scene-label");
   const mediaState = document.getElementById("studio-media-state");
+  const useSmoothPreview = smoothPreviewActive();
 
-  video.muted = true;
+  video.muted = !useSmoothPreview;
   if (nextVideo) nextVideo.muted = true;
   if (audio) audio.muted = false;
-  const mediaChanged = setPlaybackElementSource(video, media?.source_ref?.media_url || "");
   const voiceoverTrack = combinedVoiceoverTrack();
-  const audioChanged = setPlaybackElementSource(audio, voiceoverTrack?.audio_url || audioItem?.source_ref?.audio_url || "");
-  applyStudioMediaEffects(video, media);
-  if (mediaChanged && media && !state.timelinePlaying) {
-    const setInitialCutTime = () => {
-      try {
-        video.currentTime = mediaTrimStart(media);
-      } catch {
-        return;
-      }
-      updateStudioClock(media.start_seconds);
-    };
-    if (video.readyState > 0) setInitialCutTime();
-    else video.addEventListener("loadedmetadata", setInitialCutTime, { once: true });
-  }
-  if (audioChanged && audio && !state.timelinePlaying) {
-    const resetAudio = () => {
-      try {
-        audio.currentTime = voiceoverTrack ? Number(media?.start_seconds || 0) : 0;
-      } catch {
-        return;
-      }
-    };
-    if (audio.readyState > 0) resetAudio();
-    else audio.addEventListener("loadedmetadata", resetAudio, { once: true });
+  if (useSmoothPreview) {
+    const previewChanged = setPlaybackElementSource(video, state.smoothPreview.preview_url || "");
+    if (nextVideo) {
+      nextVideo.pause();
+      nextVideo.style.opacity = "0";
+      nextVideo.removeAttribute("src");
+      nextVideo.load();
+    }
+    setPlaybackElementSource(audio, "");
+    video.dataset.baseTransform = "";
+    video.dataset.transitionTransform = "";
+    video.style.transform = "";
+    video.style.filter = "";
+    video.style.opacity = "";
+    if (previewChanged && !state.timelinePlaying) {
+      const seekSmoothPreview = () => {
+        try {
+          video.currentTime = state.timelinePlayheadSeconds || 0;
+        } catch {
+          return;
+        }
+        updateStudioClock(state.timelinePlayheadSeconds || 0);
+      };
+      if (video.readyState > 0) seekSmoothPreview();
+      else video.addEventListener("loadedmetadata", seekSmoothPreview, { once: true });
+    }
+  } else {
+    const mediaChanged = setPlaybackElementSource(video, media?.source_ref?.media_url || "");
+    const audioChanged = setPlaybackElementSource(audio, voiceoverTrack?.audio_url || audioItem?.source_ref?.audio_url || "");
+    applyStudioMediaEffects(video, media);
+    if (mediaChanged && media && !state.timelinePlaying) {
+      const setInitialCutTime = () => {
+        try {
+          video.currentTime = mediaTrimStart(media);
+        } catch {
+          return;
+        }
+        updateStudioClock(media.start_seconds);
+      };
+      if (video.readyState > 0) setInitialCutTime();
+      else video.addEventListener("loadedmetadata", setInitialCutTime, { once: true });
+    }
+    if (audioChanged && audio && !state.timelinePlaying) {
+      const resetAudio = () => {
+        try {
+          audio.currentTime = voiceoverTrack ? Number(media?.start_seconds || 0) : 0;
+        } catch {
+          return;
+        }
+      };
+      if (audio.readyState > 0) resetAudio();
+      else audio.addEventListener("loadedmetadata", resetAudio, { once: true });
+    }
   }
 
   sceneLabel.textContent = row ? `Scene ${row.scene.order}` : "No scene selected";
-  mediaState.textContent = studioMediaStateLabel(media, audioItem, voiceoverTrack);
+  mediaState.textContent = useSmoothPreview ? smoothPreviewStatusLabel(state.smoothPreview) : studioMediaStateLabel(media, audioItem, voiceoverTrack);
   stage.dataset.overlay = overlayIdForItem(overlay);
   stage.style.setProperty("--scene-overlay-opacity", String(Number(overlay?.style?.opacity ?? 0.35)));
   stage.dataset.captionStyle = caption?.style?.caption_style_id || state.preset.captions.style_id || "bold_outline";
@@ -1857,7 +2017,7 @@ function renderStudioStage() {
   textEl.dataset.itemId = text?.item_id || "";
   renderStudioText(text);
   renderStudioIcons();
-  if (!state.timelinePlaying && media) updateStudioClock(media.start_seconds);
+  if (!state.timelinePlaying && media) updateStudioClock(useSmoothPreview ? state.timelinePlayheadSeconds : media.start_seconds);
   else updateStudioClock();
   updateStudioPlaybackButton();
 }
@@ -1946,7 +2106,9 @@ function captionHtmlForTime(chunks, row, item, globalTime, style) {
   const duration = Math.max(0.25, row?.scene.duration_seconds || item?.end_seconds - item?.start_seconds || words.length * 0.35);
   const activeIndex = clamp(Math.floor((local / duration) * words.length), 0, words.length - 1);
   const mode = style.caption_mode || "active_word_highlight";
-  if (mode === "one_word") return escapeHtml(words[activeIndex] || "");
+  if (mode === "one_word") {
+    return `<span class="is-active" style="color:${escapeHtml(style.active_word_color || "#3ce6ac")};text-shadow:var(--caption-active-glow, none);">${escapeHtml(words[activeIndex] || "")}</span>`;
+  }
   if (mode === "full_line") return escapeHtml(text);
   if (mode === "word_reveal" || mode === "typewriter") return escapeHtml(words.slice(0, activeIndex + 1).join(" "));
   if (mode === "two_line_karaoke") {
@@ -2168,6 +2330,10 @@ function seekTimeline(globalTime, options = {}) {
       state.selectedItemId = media.item_id;
     }
     renderStudio();
+    if (smoothPreviewActive()) {
+      syncSmoothPreviewToTimeline(time, options);
+      return;
+    }
     syncStudioVideoToTimeline(time, options);
     return;
   }
@@ -2180,6 +2346,26 @@ function mediaItemAtTime(time) {
     || mediaItems.find((item) => time < item.start_seconds)
     || mediaItems.at(-1)
     || null;
+}
+
+function syncSmoothPreviewToTimeline(globalTime, options = {}) {
+  const video = document.getElementById("studio-video");
+  if (!video || !smoothPreviewActive()) return;
+  const targetTime = clamp(globalTime, 0, Math.max(0, Number(state.timeline?.duration_seconds || globalTime || 0)));
+  const setTime = () => {
+    const drift = Math.abs(Number(video.currentTime || 0) - targetTime);
+    if (!options.tolerateDrift || drift > 0.2 || video.paused) {
+      try {
+        video.currentTime = targetTime;
+      } catch {
+        return;
+      }
+    }
+    updateStudioClock(targetTime);
+    if (options.autoplay && video.paused) playStudioVideo();
+  };
+  if (video.readyState > 0) setTime();
+  else video.addEventListener("loadedmetadata", setTime, { once: true });
 }
 
 function syncStudioVideoToTimeline(globalTime, options = {}) {
@@ -2287,7 +2473,7 @@ function playStudioVideo() {
       updateStudioPlaybackButton();
     });
   }
-  playStudioAudio();
+  if (!smoothPreviewActive()) playStudioAudio();
 }
 
 function currentMediaItem() {
@@ -2305,6 +2491,9 @@ function assetDurationFromMedia(media, video = null) {
 }
 
 function globalTimeFromVideo(media = currentMediaItem(), video = document.getElementById("studio-video")) {
+  if (smoothPreviewActive()) {
+    return clamp(Number(video?.currentTime || 0), 0, Math.max(1, state.timeline?.duration_seconds || 1));
+  }
   if (!media) return state.timelinePlayheadSeconds || 0;
   const localElapsed = Math.max(0, Number(video?.currentTime || 0) - mediaTrimStart(media));
   return (media.start_seconds || 0) + localElapsed;
@@ -2374,6 +2563,16 @@ function applyTransitionPreview(globalTime) {
   const video = document.getElementById("studio-video");
   const nextVideo = document.getElementById("studio-next-video");
   if (!stage || !video || !nextVideo) return;
+  if (smoothPreviewActive()) {
+    stage.dataset.transitionPreview = "rendered";
+    stage.style.setProperty("--transition-flash-opacity", "0");
+    video.dataset.transitionTransform = "";
+    video.style.opacity = "";
+    nextVideo.dataset.transitionTransform = "";
+    nextVideo.style.opacity = "0";
+    setStudioVideoTransform(video);
+    return;
+  }
   const item = transitionItemAtTime(globalTime);
   if (!item) {
     stage.dataset.transitionPreview = "none";
@@ -2401,7 +2600,7 @@ function applyTransitionPreview(globalTime) {
   const requestedId = normalizedTransitionId(transitionIdForItem(item));
   const id = SAFE_REALTIME_TRANSITIONS.has(requestedId) ? requestedId : "fade";
   const nextMedia = nextMediaForTransition(item);
-  syncTransitionNextVideo(nextVideo, nextMedia);
+  syncTransitionNextVideo(nextVideo, nextMedia, { preplay: state.timelinePlaying && rawProgress > 0.72 });
   const nextReady = Boolean(nextMedia?.source_ref?.media_url) && nextVideo.dataset.transitionReady === "true";
   let outOpacity = 1;
   let inOpacity = nextReady ? progress : 0;
@@ -2483,7 +2682,7 @@ function easeInOutCubic(value) {
   return p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
 }
 
-function syncTransitionNextVideo(nextVideo, nextMedia) {
+function syncTransitionNextVideo(nextVideo, nextMedia, options = {}) {
   if (!nextVideo) return;
   if (!nextMedia?.source_ref?.media_url) {
     nextVideo.dataset.transitionReady = "false";
@@ -2496,21 +2695,30 @@ function syncTransitionNextVideo(nextVideo, nextMedia) {
   const targetTime = mediaTrimStart(nextMedia);
   const setTime = () => {
     const drift = Math.abs(Number(nextVideo.currentTime || 0) - targetTime);
-    if (changed || drift > 0.08 || !state.timelinePlaying) {
+    const driftLimit = options.preplay ? 0.35 : 0.08;
+    if (changed || drift > driftLimit || !state.timelinePlaying) {
       try {
         nextVideo.currentTime = targetTime;
       } catch {
         return;
       }
     }
-    nextVideo.pause();
+    if (options.preplay && nextVideo.readyState >= 2) playBufferedVideo(nextVideo);
+    else nextVideo.pause();
     nextVideo.dataset.transitionReady = nextVideo.readyState >= 2 ? "true" : "false";
   };
   if (nextVideo.readyState > 0) setTime();
   else nextVideo.addEventListener("loadedmetadata", setTime, { once: true });
   nextVideo.addEventListener("canplay", () => {
     nextVideo.dataset.transitionReady = "true";
+    if (options.preplay) playBufferedVideo(nextVideo);
   }, { once: true });
+}
+
+function playBufferedVideo(video) {
+  if (!video?.src || !video.paused) return;
+  const promise = video.play();
+  if (promise?.catch) promise.catch(() => {});
 }
 
 function placeTimelineClip(clip, item) {
@@ -2722,6 +2930,7 @@ async function patchTimelineItem(itemId, patch, options = {}) {
   });
   const index = state.timeline.items.findIndex((item) => item.item_id === itemId);
   if (index >= 0) state.timeline.items[index] = data.item;
+  markSmoothPreviewStale();
   if (options.render !== false) renderStudio();
 }
 
@@ -2918,6 +3127,10 @@ function playTimelineFrom(globalTime) {
 }
 
 function onStudioVideoTimeUpdate() {
+  if (smoothPreviewActive()) {
+    syncTimelineToSmoothPreview();
+    return;
+  }
   updateStudioClock();
   if (combinedVoiceoverTrack()) return;
   if (!state.timelinePlaying) return;
@@ -2933,6 +3146,12 @@ function onStudioVideoTimeUpdate() {
 
 function onStudioVideoEnded() {
   if (!state.timelinePlaying) return;
+  if (smoothPreviewActive()) {
+    state.timelinePlaying = false;
+    seekTimeline(Math.max(0, state.timeline?.duration_seconds || 0));
+    updateStudioPlaybackButton();
+    return;
+  }
   if (combinedVoiceoverTrack()) {
     syncTimelineToVoiceover(globalTimeFromAudio());
     return;
@@ -2960,6 +3179,29 @@ function advanceTimelinePlayback(globalTime) {
   seekTimeline(globalTime, { autoplay: true });
 }
 
+function syncTimelineToSmoothPreview() {
+  const video = document.getElementById("studio-video");
+  if (!state.timeline || !smoothPreviewActive() || !video) return;
+  const duration = Math.max(1, state.timeline.duration_seconds || 1);
+  const time = clamp(Number(video.currentTime || 0), 0, duration);
+  if (time >= duration - 0.03) {
+    state.timelinePlaying = false;
+    pauseStudioMedia();
+    seekTimeline(duration);
+    updateStudioPlaybackButton();
+    return;
+  }
+  const media = mediaItemAtTime(time);
+  if (media && state.selectedSceneId !== media.scene_id) {
+    state.selectedSceneId = media.scene_id;
+    if (!selectedItem() || selectedItem()?.scene_id !== media.scene_id) {
+      state.selectedItemId = media.item_id;
+    }
+    renderStudio();
+  }
+  updateStudioClock(time);
+}
+
 function syncTimelineToVoiceover(globalTime) {
   if (!state.timeline || !combinedVoiceoverTrack()) return;
   const duration = Math.max(1, state.timeline.duration_seconds || 1);
@@ -2982,15 +3224,42 @@ function syncTimelineToVoiceover(globalTime) {
     if (!selectedItem() || selectedItem()?.scene_id !== media.scene_id) {
       state.selectedItemId = media.item_id;
     }
+    promoteTransitionBufferToPrimary(media);
     renderStudio();
   }
   syncStudioVideoToTimeline(time, {
     autoplay: true,
     tolerateDrift: true,
     skipAudioSync: true,
-    videoDriftThreshold: sceneChanged ? 0 : 0.18,
+    videoDriftThreshold: sceneChanged ? 0.35 : 0.18,
   });
   updateStudioClock(time);
+}
+
+function promoteTransitionBufferToPrimary(media) {
+  const video = document.getElementById("studio-video");
+  const nextVideo = document.getElementById("studio-next-video");
+  if (!video || !nextVideo || !media?.source_ref?.media_url) return false;
+  const nextSrc = nextVideo.getAttribute("src") || "";
+  if (nextSrc !== media.source_ref.media_url || nextVideo.dataset.transitionReady !== "true") return false;
+
+  video.pause();
+
+  video.id = "studio-next-video";
+  nextVideo.id = "studio-video";
+  video.classList.add("vd-next-video");
+  nextVideo.classList.remove("vd-next-video");
+
+  video.style.opacity = "0";
+  video.dataset.transitionTransform = "";
+  setStudioVideoTransform(video);
+
+  nextVideo.style.opacity = "";
+  nextVideo.dataset.transitionTransform = "";
+  applyStudioMediaEffects(nextVideo, media);
+  setStudioVideoTransform(nextVideo);
+
+  return true;
 }
 
 function startTimelineFrameTicker() {
@@ -2998,7 +3267,8 @@ function startTimelineFrameTicker() {
   const tick = () => {
     timelineFrameRequest = null;
     if (!state.timelinePlaying) return;
-    if (combinedVoiceoverTrack()) syncTimelineToVoiceover(globalTimeFromAudio());
+    if (smoothPreviewActive()) syncTimelineToSmoothPreview();
+    else if (combinedVoiceoverTrack()) syncTimelineToVoiceover(globalTimeFromAudio());
     else updateStudioClock();
     timelineFrameRequest = requestAnimationFrame(tick);
   };
@@ -3014,7 +3284,7 @@ function stopTimelineFrameTicker() {
 function updateStudioClock(forcedGlobalTime = null) {
   const media = currentMediaItem();
   const hasForcedTime = typeof forcedGlobalTime === "number" && Number.isFinite(forcedGlobalTime);
-  const globalTime = hasForcedTime ? forcedGlobalTime : (combinedVoiceoverTrack() ? globalTimeFromAudio() : globalTimeFromVideo(media));
+  const globalTime = hasForcedTime ? forcedGlobalTime : (smoothPreviewActive() ? globalTimeFromVideo(media) : (combinedVoiceoverTrack() ? globalTimeFromAudio() : globalTimeFromVideo(media)));
   state.timelinePlayheadSeconds = clamp(globalTime, 0, Math.max(1, state.timeline?.duration_seconds || 1));
   updateCaptionPreview(state.timelinePlayheadSeconds);
   applyTransitionPreview(state.timelinePlayheadSeconds);

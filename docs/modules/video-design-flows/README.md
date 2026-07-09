@@ -16,6 +16,7 @@ Project Start
 -> Studio Creative Controls
 -> Studio Continuity & Render
 -> Studio Transition, Caption Drag & Playhead
+-> Studio Audio, BGM & Event-Driven SFX
 ```
 
 Each flow should feel like a dedicated screen, not a section in one long form.
@@ -31,6 +32,7 @@ Each flow should feel like a dedicated screen, not a section in one long form.
 - [07 Studio Creative Controls Flow](07-studio-creative-controls-flow.md)
 - [08 Studio Continuity And Render Flow](08-studio-continuity-render-flow.md)
 - [09 Studio Transition, Caption Drag, And Playhead Flow](09-studio-transition-caption-playhead-flow.md)
+- [10 Studio Audio, BGM, And Event-Driven SFX Flow](10-studio-audio-bgm-sfx-flow.md)
 
 ## Shared Shell
 

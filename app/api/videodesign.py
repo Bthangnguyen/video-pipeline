@@ -290,6 +290,30 @@ async def clear_timeline(project_id: str):
         return error_response(error)
 
 
+@router.get("/projects/{project_id}/preview")
+async def preview_status(project_id: str):
+    try:
+        return videodesign_service.preview_status(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/preview/render")
+async def render_preview(project_id: str):
+    try:
+        return await videodesign_service.render_smooth_preview(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/preview/file")
+async def preview_file(project_id: str):
+    try:
+        return FileResponse(videodesign_service.smooth_preview_file_path(project_id), media_type="video/mp4")
+    except VideoDesignError as error:
+        return error_response(error)
+
+
 @router.post("/projects/{project_id}/timeline/items")
 async def create_timeline_item(project_id: str, request: TimelineItemCreateRequest):
     try:
