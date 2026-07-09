@@ -623,8 +623,21 @@ def test_videodesign_search_returns_douyin_and_pinterest_candidates(monkeypatch)
     project_id = _create_project(client)
     plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
     scene_id = plan_response.json()["scenes"][0]["scene_id"]
+    client.patch(
+        f"/api/videodesign/projects/{project_id}/scenes/{scene_id}",
+        json={
+            "visual_search_plan": {
+                "douyin_primary_keyword": "情侣 冷战",
+                "pinterest_primary_keyword": "couple awkward silence vertical video",
+                "fallbacks": {"douyin": [], "pinterest": []},
+            },
+            "matching_keywords": ["couple awkward silence vertical video"],
+        },
+    )
+    seen = {"douyin": [], "pinterest": []}
 
     async def fake_douyin_search(request):
+        seen["douyin"].append((request.keyword, request.translate_to_chinese))
         return SearchResponse(
             keyword=request.keyword,
             search_keyword=request.keyword,
@@ -643,6 +656,7 @@ def test_videodesign_search_returns_douyin_and_pinterest_candidates(monkeypatch)
         )
 
     async def fake_pinterest_search(request):
+        seen["pinterest"].append(request.keyword)
         return PinterestSearchResponse(
             keyword=request.keyword,
             media_type="video",
@@ -683,6 +697,8 @@ def test_videodesign_search_returns_douyin_and_pinterest_candidates(monkeypatch)
     assert {candidate["source_item_id"] for candidate in candidates} == {"dy-aweme", "pin-1"}
     pinterest_candidate = next(candidate for candidate in candidates if candidate["source"] == "pinterestsearch")
     assert pinterest_candidate["media_url"] == "/pin-media"
+    assert seen["douyin"] == [("情侣 冷战", False)]
+    assert seen["pinterest"] == ["couple awkward silence vertical video"]
 
 
 def test_videodesign_materials_preflight_returns_source_checks(monkeypatch):
@@ -869,8 +885,22 @@ def test_videodesign_smart_keywords_feed_material_search(monkeypatch):
     scene_id = plan_response.json()["scenes"][0]["scene_id"]
     seen_keywords = []
 
-    async def fake_keywords(**kwargs):
-        return ["cat close up raw footage", "cat playing"]
+    async def fake_visual_keywords(**kwargs):
+        return {
+            "scenes": [
+                {
+                    "scene_id": kwargs["scene_id"],
+                    "retention_role": "hook",
+                    "visual_intent": "cat reacting to a voice",
+                    "visual_archetype": "cat close up",
+                    "douyin_primary_keyword": "猫咪 反应",
+                    "pinterest_primary_keyword": "cat close up vertical video",
+                    "fallbacks": {"douyin": ["猫咪 日常"], "pinterest": ["cat reacting video"]},
+                    "avoid": [],
+                    "material_notes": "Prefer real cat footage.",
+                }
+            ]
+        }
 
     async def fake_search(request):
         seen_keywords.append(request.keyword)
@@ -891,7 +921,7 @@ def test_videodesign_smart_keywords_feed_material_search(monkeypatch):
             ],
         )
 
-    monkeypatch.setattr(videodesign_service.script_client, "generate_search_keywords", fake_keywords)
+    monkeypatch.setattr(videodesign_service.script_client, "generate_visual_search_keywords", fake_visual_keywords)
     monkeypatch.setattr(douyin_service, "search", fake_search)
 
     response = client.post(
@@ -906,8 +936,10 @@ def test_videodesign_smart_keywords_feed_material_search(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert seen_keywords == ["cat close up raw footage"]
-    assert response.json()["rows"][0]["scene"]["matching_keywords"][0] == "cat close up raw footage"
+    assert seen_keywords == ["猫咪 反应"]
+    scene = response.json()["rows"][0]["scene"]
+    assert scene["matching_keywords"][0] == "cat close up vertical video"
+    assert scene["visual_search_plan"]["douyin_primary_keyword"] == "猫咪 反应"
 
 
 def test_videodesign_keyword_generation_endpoint_updates_scene(monkeypatch):
@@ -916,10 +948,24 @@ def test_videodesign_keyword_generation_endpoint_updates_scene(monkeypatch):
     plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
     scene_id = plan_response.json()["scenes"][0]["scene_id"]
 
-    async def fake_keywords(**kwargs):
-        return ["cat close up raw footage", "cat playing"]
+    async def fake_visual_keywords(**kwargs):
+        return {
+            "scenes": [
+                {
+                    "scene_id": kwargs["scene_id"],
+                    "retention_role": "hook",
+                    "visual_intent": "cat reacting to a voice",
+                    "visual_archetype": "cat close up",
+                    "douyin_primary_keyword": "猫咪 反应",
+                    "pinterest_primary_keyword": "cat close up vertical video",
+                    "fallbacks": {"douyin": ["猫咪 日常"], "pinterest": ["cat reacting video"]},
+                    "avoid": [],
+                    "material_notes": "Prefer real cat footage.",
+                }
+            ]
+        }
 
-    monkeypatch.setattr(videodesign_service.script_client, "generate_search_keywords", fake_keywords)
+    monkeypatch.setattr(videodesign_service.script_client, "generate_visual_search_keywords", fake_visual_keywords)
 
     response = client.post(
         f"/api/videodesign/projects/{project_id}/keywords/generate",
@@ -929,7 +975,8 @@ def test_videodesign_keyword_generation_endpoint_updates_scene(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["errors"] == []
-    assert body["scenes"][0]["matching_keywords"] == ["cat close up raw footage"]
+    assert body["scenes"][0]["matching_keywords"] == ["cat close up vertical video"]
+    assert body["scenes"][0]["visual_search_plan"]["douyin_primary_keyword"] == "猫咪 反应"
 
 
 def test_videodesign_smart_keyword_failure_falls_back_during_search(monkeypatch):
@@ -939,7 +986,7 @@ def test_videodesign_smart_keyword_failure_falls_back_during_search(monkeypatch)
     scene_id = plan_response.json()["scenes"][0]["scene_id"]
     seen_keywords = []
 
-    async def fake_keywords(**kwargs):
+    async def fake_visual_keywords(**kwargs):
         raise VideoDesignError(SCRIPT_GENERATION_FAILED, "DeepSeek keyword generation failed: network", retryable=True)
 
     async def fake_search(request):
@@ -961,7 +1008,7 @@ def test_videodesign_smart_keyword_failure_falls_back_during_search(monkeypatch)
             ],
         )
 
-    monkeypatch.setattr(videodesign_service.script_client, "generate_search_keywords", fake_keywords)
+    monkeypatch.setattr(videodesign_service.script_client, "generate_visual_search_keywords", fake_visual_keywords)
     monkeypatch.setattr(douyin_service, "search", fake_search)
 
     response = client.post(

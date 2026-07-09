@@ -601,15 +601,27 @@ async function saveMaterialKeywords() {
 }
 
 async function saveMaterialKeywordsDraft(row) {
-  const keywords = keywordsFromText(inputValue("materials-keywords"));
+  const douyinKeyword = inputValue("materials-douyin-keyword").trim();
+  const pinterestKeyword = inputValue("materials-pinterest-keyword").trim();
+  const keywords = uniqueValues([pinterestKeyword, douyinKeyword]);
+  const visualPlan = {
+    ...sceneVisualSearchPlan(row.scene),
+    douyin_primary_keyword: douyinKeyword,
+    pinterest_primary_keyword: pinterestKeyword,
+  };
   await api(`/api/videodesign/projects/${state.projectId}/scenes/${row.scene.scene_id}`, {
     method: "PATCH",
-    body: { matching_keywords: keywords },
+    body: { matching_keywords: keywords, visual_search_plan: visualPlan },
   });
 }
 
 async function runMaterialHealth() {
-  const keyword = keywordsFromText(inputValue("materials-keywords"))[0] || selectedRow()?.scene.matching_keywords?.[0] || "cat";
+  const row = selectedRow();
+  const keyword = inputValue("materials-douyin-keyword").trim()
+    || inputValue("materials-pinterest-keyword").trim()
+    || materialKeywordsForScene(row?.scene).douyin
+    || materialKeywordsForScene(row?.scene).pinterest
+    || "cat";
   state.materialHealth = { running: true, keyword, sources: [] };
   renderMaterialHealth();
   await run("Checking Douyin and Pinterest health", async () => {
@@ -1156,20 +1168,51 @@ function hydrateCandidateCoverImages(container) {
 }
 
 function renderMaterialControls(row) {
-  const keywords = row?.scene.matching_keywords || [];
+  const plan = sceneVisualSearchPlan(row?.scene);
+  const keywords = materialKeywordsForScene(row?.scene);
   const chips = document.getElementById("materials-keyword-chips");
   if (chips) {
-    chips.innerHTML = keywords.length
-      ? keywords.map((keyword) => `<button data-keyword-chip="${escapeHtml(keyword)}" type="button">${escapeHtml(keyword)}</button>`).join("")
-      : `<span class="vd-muted">No keywords yet.</span>`;
-    chips.querySelectorAll("[data-keyword-chip]").forEach((button) => {
-      button.addEventListener("click", () => setInputValue("materials-keywords", button.dataset.keywordChip || ""));
+    chips.innerHTML = keywords.douyin || keywords.pinterest
+      ? `
+        ${keywords.douyin ? `<button data-keyword-source="douyin" type="button"><strong>Douyin</strong> ${escapeHtml(keywords.douyin)}</button>` : ""}
+        ${keywords.pinterest ? `<button data-keyword-source="pinterest" type="button"><strong>Pinterest</strong> ${escapeHtml(keywords.pinterest)}</button>` : ""}
+      `
+      : `<span class="vd-muted">No visual search plan yet.</span>`;
+    chips.querySelectorAll("[data-keyword-source]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (button.dataset.keywordSource === "douyin") setInputValue("materials-douyin-keyword", keywords.douyin || "");
+        if (button.dataset.keywordSource === "pinterest") setInputValue("materials-pinterest-keyword", keywords.pinterest || "");
+      });
     });
   }
-  setInputValue("materials-keywords", keywords.join(", "));
+  setInputValue("materials-douyin-keyword", keywords.douyin || "");
+  setInputValue("materials-pinterest-keyword", keywords.pinterest || "");
+  renderVisualSearchNotes(plan);
   renderSearchErrors(row);
   renderMaterialHealth();
   renderMaterialPreview(row);
+}
+
+function renderVisualSearchNotes(plan) {
+  const panel = document.getElementById("materials-visual-notes");
+  if (!panel) return;
+  if (!plan || !Object.keys(plan).length) {
+    panel.innerHTML = `<p class="vd-muted">Generate keywords to create a visual search plan.</p>`;
+    return;
+  }
+  const douyinFallbacks = plan.fallbacks?.douyin || [];
+  const pinterestFallbacks = plan.fallbacks?.pinterest || [];
+  panel.innerHTML = `
+    ${plan.retention_role ? `<p><strong>Role</strong> ${escapeHtml(plan.retention_role)}</p>` : ""}
+    ${plan.visual_archetype ? `<p><strong>Visual</strong> ${escapeHtml(plan.visual_archetype)}</p>` : ""}
+    ${plan.material_notes ? `<p>${escapeHtml(plan.material_notes)}</p>` : ""}
+    ${douyinFallbacks.length || pinterestFallbacks.length ? `
+      <p class="vd-muted">Fallbacks:
+        ${douyinFallbacks.length ? `Douyin ${douyinFallbacks.map(escapeHtml).join(", ")}` : ""}
+        ${pinterestFallbacks.length ? ` Pinterest ${pinterestFallbacks.map(escapeHtml).join(", ")}` : ""}
+      </p>
+    ` : ""}
+  `;
 }
 
 function renderSearchErrors(row) {
@@ -4084,6 +4127,31 @@ function sentenceCount(text) {
 
 function keywordsFromText(text) {
   return String(text || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function uniqueValues(values) {
+  const seen = new Set();
+  return (values || []).map((value) => String(value || "").trim()).filter((value) => {
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function sceneVisualSearchPlan(scene) {
+  return scene?.visual_search_plan && typeof scene.visual_search_plan === "object"
+    ? scene.visual_search_plan
+    : {};
+}
+
+function materialKeywordsForScene(scene) {
+  const plan = sceneVisualSearchPlan(scene);
+  const legacy = scene?.matching_keywords || [];
+  return {
+    douyin: String(plan.douyin_primary_keyword || legacy[0] || "").trim(),
+    pinterest: String(plan.pinterest_primary_keyword || legacy[0] || "").trim(),
+  };
 }
 
 function formatDuration(seconds) {

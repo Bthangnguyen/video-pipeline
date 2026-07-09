@@ -379,7 +379,16 @@ class VideoDesignService:
     def update_scene(self, project_id: str, scene_id: str, patch: dict) -> dict:
         project = self.store.get(project_id)
         scene = _scene(project, scene_id)
-        for key in ("voiceover_text", "tts_text", "on_screen_text", "caption_text", "visual_brief", "matching_keywords"):
+        for key in (
+            "voiceover_text",
+            "tts_text",
+            "on_screen_text",
+            "caption_text",
+            "visual_brief",
+            "matching_keywords",
+            "negative_keywords",
+            "visual_search_plan",
+        ):
             if key in patch:
                 setattr(scene, key, patch[key])
         if "voiceover_text" in patch and "tts_text" not in patch:
@@ -609,14 +618,15 @@ class VideoDesignService:
         total = len(scenes)
         self._set_progress(project, "keyword_generation", "Preparing search keywords.", 0, total)
         for index, scene in enumerate(scenes, start=1):
-            keywords, error = await self._smart_keywords_or_fallback(project, scene, 1)
+            plan, error = await self._smart_visual_plan_or_fallback(project, scene)
+            keywords = _legacy_keywords_from_visual_plan(plan, 1)
             scene.matching_keywords = keywords
             if error:
                 errors.append({"scene_id": scene.scene_id, "error": error})
             self._set_progress(
                 project,
                 "keyword_generation",
-                f"Prepared scene {index}/{total} keywords: {', '.join(keywords[:2])}",
+                f"Prepared scene {index}/{total}: Douyin {plan.get('douyin_primary_keyword', '')} / Pinterest {plan.get('pinterest_primary_keyword', '')}",
                 index,
                 total,
                 {"scene_id": scene.scene_id, "fallback": bool(error)},
@@ -645,7 +655,6 @@ class VideoDesignService:
         plans = []
         for index, scene in enumerate(scenes, start=1):
             scene.approval_state = "searching"
-            keywords = await self._keywords_for_scene(project, scene, request)
             source_plan = [
                 ("douyinsearch", douyin_limit),
                 ("pinterestsearch", pinterest_limit),
@@ -655,6 +664,7 @@ class VideoDesignService:
                     continue
                 if len(_candidates_for_scene(project, scene.scene_id, source)) >= source_limit:
                     continue
+                keywords = await self._keywords_for_scene_source(project, scene, request, source)
                 plans.append(
                     {
                         "index": index,
@@ -697,7 +707,7 @@ class VideoDesignService:
                         scene_id=scene.scene_id,
                         source=source,
                         keyword=keyword,
-                        translate_to_chinese=request.translate_to_chinese if source == "douyinsearch" else False,
+                        translate_to_chinese=_should_translate_douyin_keyword(keyword, request.translate_to_chinese) if source == "douyinsearch" else False,
                         limit=max(needed, 3),
                         status="searching",
                     )
@@ -715,11 +725,12 @@ class VideoDesignService:
                         self.store.put(project)
                     try:
                         if source == "douyinsearch":
+                            translate_keyword = _should_translate_douyin_keyword(keyword, request.translate_to_chinese)
                             response = await asyncio.wait_for(
                                 douyin_service.search(
                                     SearchRequest(
                                         keyword=keyword,
-                                        translate_to_chinese=request.translate_to_chinese,
+                                        translate_to_chinese=translate_keyword,
                                         limit=max(needed, 3),
                                         strategy="auto",
                                     )
@@ -1031,15 +1042,21 @@ class VideoDesignService:
                 ) from exc
             raise
 
-    async def _keywords_for_scene(
+    async def _keywords_for_scene_source(
         self,
         project: VideoDesignProject,
         scene: ScenePlan,
         request: MaterialsSearchRequest,
+        source: str,
     ) -> list[str]:
         if request.use_smart_keywords:
-            keywords, _error = await self._smart_keywords_or_fallback(project, scene, 1)
-            return keywords[:1]
+            plan, _error = await self._smart_visual_plan_or_fallback(project, scene)
+            keywords = _source_keywords_from_visual_plan(plan, source, request.queries_per_scene)
+            if keywords:
+                return keywords
+        keywords = _source_keywords_from_visual_plan(scene.visual_search_plan, source, request.queries_per_scene)
+        if keywords:
+            return keywords
         keywords = _normalize_keywords(scene.matching_keywords, request.queries_per_scene)
         if keywords:
             return keywords
@@ -1048,40 +1065,49 @@ class VideoDesignService:
         self.store.put(project)
         return keywords
 
-    async def _smart_keywords_or_fallback(
+    async def _smart_visual_plan_or_fallback(
         self,
         project: VideoDesignProject,
         scene: ScenePlan,
-        limit: int,
-    ) -> tuple[list[str], dict | None]:
+        selected_scene_ids: list[str] | None = None,
+    ) -> tuple[dict, dict | None]:
         try:
-            keywords = await self.script_client.generate_search_keywords(
+            data = await self.script_client.generate_visual_search_keywords(
+                project_idea=project.idea,
+                full_script=project.script,
+                scene_id=scene.scene_id,
+                scene_order=scene.order,
                 voiceover_text=scene.voiceover_text,
                 visual_brief=scene.visual_brief,
                 on_screen_text=scene.on_screen_text,
                 language=project.language,
+                target_style=str(project.design_preset.get("scene_media", {}).get("style", "mixed")),
             )
-            normalized = _normalize_keywords(keywords, limit)
-            if normalized:
-                scene.matching_keywords = normalized
+            plan = _normalize_visual_search_plan(data, scene, selected_scene_ids)
+            if plan:
+                scene.visual_search_plan = plan
+                scene.matching_keywords = _legacy_keywords_from_visual_plan(plan, 1)
                 self.store.put(project)
-                return normalized, None
+                return plan, None
         except VideoDesignError as error:
-            fallback = _fallback_keywords_for_scene(project, scene, limit)
-            scene.matching_keywords = fallback
+            fallback = _fallback_visual_search_plan(project, scene)
+            scene.visual_search_plan = fallback
+            scene.matching_keywords = _legacy_keywords_from_visual_plan(fallback, 1)
             self.store.put(project)
             return fallback, error.to_payload()
         except Exception as exc:
-            fallback = _fallback_keywords_for_scene(project, scene, limit)
-            scene.matching_keywords = fallback
+            fallback = _fallback_visual_search_plan(project, scene)
+            scene.visual_search_plan = fallback
+            scene.matching_keywords = _legacy_keywords_from_visual_plan(fallback, 1)
             self.store.put(project)
             return fallback, {"code": SCRIPT_GENERATION_FAILED, "message": str(exc), "retryable": True}
-        fallback = _fallback_keywords_for_scene(project, scene, limit)
-        scene.matching_keywords = fallback
+        fallback = _fallback_visual_search_plan(project, scene)
+        scene.visual_search_plan = fallback
+        scene.matching_keywords = _legacy_keywords_from_visual_plan(fallback, 1)
         self.store.put(project)
         return fallback, {
             "code": SCRIPT_GENERATION_FAILED,
-            "message": "DeepSeek did not return usable search keywords.",
+            "message": "DeepSeek did not return usable visual search keywords.",
             "retryable": True,
         }
 
@@ -1591,6 +1617,107 @@ def _fallback_keywords_for_scene(project: VideoDesignProject, scene: ScenePlan, 
         if len(candidates) >= max(1, limit):
             break
     return candidates[: max(1, limit)] or ["raw vertical footage"]
+
+
+def _normalize_visual_search_plan(data: dict, scene: ScenePlan, selected_scene_ids: list[str] | None = None) -> dict:
+    item = {}
+    for candidate in data.get("scenes") or []:
+        if str(candidate.get("scene_id") or "") == scene.scene_id:
+            item = candidate
+            break
+    if not item and data.get("scenes"):
+        item = data["scenes"][0] or {}
+
+    global_hook = data.get("global_hook_strategy") or {}
+    is_hook = scene.order == 1
+    douyin_primary = _first_text(
+        item.get("douyin_primary_keyword"),
+        global_hook.get("douyin_primary_keyword") if is_hook else "",
+    )
+    pinterest_primary = _first_text(
+        item.get("pinterest_primary_keyword"),
+        global_hook.get("pinterest_primary_keyword") if is_hook else "",
+    )
+    fallback = _fallback_visual_search_plan_from_keywords(
+        scene,
+        _normalize_keywords(
+            [douyin_primary, pinterest_primary, *(_fallbacks_for_source(item, "douyin")), *(_fallbacks_for_source(item, "pinterest"))],
+            3,
+        ),
+    )
+    if not douyin_primary:
+        douyin_primary = fallback["douyin_primary_keyword"]
+    if not pinterest_primary:
+        pinterest_primary = fallback["pinterest_primary_keyword"]
+    if not douyin_primary and not pinterest_primary:
+        return {}
+
+    return {
+        "retention_role": _first_text(item.get("retention_role"), "hook" if is_hook else "evidence"),
+        "visual_intent": _first_text(item.get("visual_intent"), scene.visual_brief, scene.voiceover_text),
+        "visual_archetype": _first_text(item.get("visual_archetype"), scene.visual_brief),
+        "douyin_primary_keyword": douyin_primary,
+        "pinterest_primary_keyword": pinterest_primary,
+        "fallbacks": {
+            "douyin": _normalize_keywords(_fallbacks_for_source(item, "douyin"), 2),
+            "pinterest": _normalize_keywords(_fallbacks_for_source(item, "pinterest"), 2),
+        },
+        "avoid": _normalize_keywords(item.get("avoid", []), 8),
+        "material_notes": _first_text(item.get("material_notes"), ""),
+    }
+
+
+def _fallback_visual_search_plan(project: VideoDesignProject, scene: ScenePlan) -> dict:
+    return _fallback_visual_search_plan_from_keywords(scene, _fallback_keywords_for_scene(project, scene, 3))
+
+
+def _fallback_visual_search_plan_from_keywords(scene: ScenePlan, keywords: list[str]) -> dict:
+    normalized = _normalize_keywords(keywords, 3)
+    primary = normalized[0] if normalized else "raw vertical footage"
+    fallbacks = normalized[1:3]
+    return {
+        "retention_role": "hook" if scene.order == 1 else "evidence",
+        "visual_intent": scene.visual_brief or scene.voiceover_text,
+        "visual_archetype": scene.visual_brief or "",
+        "douyin_primary_keyword": primary,
+        "pinterest_primary_keyword": primary,
+        "fallbacks": {"douyin": fallbacks, "pinterest": fallbacks},
+        "avoid": _normalize_keywords(scene.negative_keywords, 8),
+        "material_notes": "Fallback keyword generated without DeepSeek visual search plan.",
+    }
+
+
+def _source_keywords_from_visual_plan(plan: dict | None, source: str, limit: int) -> list[str]:
+    if not plan:
+        return []
+    source_key = "douyin" if source == "douyinsearch" else "pinterest"
+    primary_key = f"{source_key}_primary_keyword"
+    values = [plan.get(primary_key), *(_fallbacks_for_source(plan, source_key))]
+    return _normalize_keywords(values, limit)
+
+
+def _legacy_keywords_from_visual_plan(plan: dict, limit: int) -> list[str]:
+    return _normalize_keywords([plan.get("pinterest_primary_keyword"), plan.get("douyin_primary_keyword")], limit)
+
+
+def _fallbacks_for_source(plan: dict, source_key: str) -> list[str]:
+    fallbacks = plan.get("fallbacks") or {}
+    values = fallbacks.get(source_key) or []
+    if isinstance(values, str):
+        values = [values]
+    return [str(value).strip() for value in values if str(value).strip()]
+
+
+def _first_text(*values) -> str:
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if text:
+            return text[:240]
+    return ""
+
+
+def _should_translate_douyin_keyword(keyword: str, requested: bool) -> bool:
+    return bool(requested and not re.search(r"[\u3400-\u9fff]", keyword or ""))
 
 
 def _keyword_phrase(text: str | None) -> str:

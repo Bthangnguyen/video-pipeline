@@ -1541,6 +1541,18 @@ textarea {
   font-size: 12px;
 }
 
+.vd-visual-search-notes {
+  display: grid;
+  gap: 6px;
+  color: #5b6472;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.vd-visual-search-notes p {
+  margin: 0;
+}
+
 .vd-search-panel textarea {
   min-height: 82px;
   resize: vertical;

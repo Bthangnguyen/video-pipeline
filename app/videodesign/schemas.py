@@ -86,6 +86,7 @@ class ScenePlan(BaseModel):
     visual_brief: str = ""
     matching_keywords: list[str] = Field(default_factory=list)
     negative_keywords: list[str] = Field(default_factory=list)
+    visual_search_plan: dict[str, Any] = Field(default_factory=dict)
     template_scene_id: str = ""
     duration_seconds: float = 0
     search_tasks: list[str] = Field(default_factory=list)
