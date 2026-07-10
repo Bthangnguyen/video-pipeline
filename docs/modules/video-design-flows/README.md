@@ -18,6 +18,7 @@ Project Start
 -> Studio Transition, Caption Drag & Playhead
 -> Studio Audio, BGM & Event-Driven SFX
 -> Platform-Native Visual Search
+-> Search Profile, Attention Pool & Popularity
 ```
 
 Each flow should feel like a dedicated screen, not a section in one long form.
@@ -35,6 +36,7 @@ Each flow should feel like a dedicated screen, not a section in one long form.
 - [09 Studio Transition, Caption Drag, And Playhead Flow](09-studio-transition-caption-playhead-flow.md)
 - [10 Studio Audio, BGM, And Event-Driven SFX Flow](10-studio-audio-bgm-sfx-flow.md)
 - [11 Platform-Native Visual Search Flow](11-platform-native-visual-search-flow.md)
+- [12 Search Profile, Attention Pool, And Popularity Flow](12-search-profile-attention-pool-flow.md)
 
 ## Shared Shell
 

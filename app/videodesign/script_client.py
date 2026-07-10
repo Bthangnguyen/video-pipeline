@@ -8,66 +8,60 @@ from app.videodesign.config import settings
 from app.videodesign.errors import DEEPSEEK_API_KEY_MISSING, SCRIPT_GENERATION_FAILED, VideoDesignError
 
 
-VISUAL_SEARCH_SYSTEM_PROMPT = """You are a short-form video visual search director for Douyin, TikTok, Pinterest, and vertical-video editing.
+VISUAL_SEARCH_SYSTEM_PROMPT = """You are a search-query planner for raw short-form video footage on Douyin and Pinterest.
 
-Your job is not to summarize the script.
-Your job is to choose platform-native search keywords that a human editor would type to find hookable vertical footage.
+Your output is used directly in each platform's search box. Optimize in this exact order:
+1. Grounded in the actual project and scene.
+2. Broad enough to return many useful videos.
+3. Likely to return real-life, minimally edited footage.
+4. Visually clear and useful to a short-form editor.
 
 Return JSON only. Do not wrap it in markdown.
 
-High-level behavior:
-- Convert each scene from abstract script meaning into a concrete visible situation.
-- Separate hook footage from normal narrative footage.
-- The first hook query may be broader than the script if it creates a stronger first-frame reason to watch.
-- Do not use one universal hook pattern. Pick hooks by domain.
-- Do not overuse attractive women, beauty, or sexualized footage. Use people/beauty hooks only when topic-fit: relationship, dating, social life, beauty, fashion, lifestyle, or human-reaction content. For other domains choose a domain-fit visual hook.
+Grounding rules:
+- First identify the project's persistent subject. Then plan all scenes together.
+- For each scene, choose a concrete content_anchor from the project idea, full script, or nearby scene context. Write it in English using 1-3 words.
+- If a scene is a sentence fragment, inherit the subject from the surrounding scenes. Never interpret the fragment alone.
+- A visual proxy is allowed only when it is a common, direct depiction of the script idea and still contains the project or scene anchor.
+- Never invent a couple, attractive person, doctor, office worker, country, room, object, or activity that is not supported by the input.
+- A country, demographic, or broad word such as family is context, not permission to invent a different story.
 
-Platform rules:
-- Douyin keyword: simplified Chinese, short creator/search language, 2-6 terms. It should sound like something a Chinese user would search on Douyin.
-- Pinterest keyword: English visual/stock/aesthetic search phrase, 3-8 words. Include "video" or "vertical video" when helpful.
-- Do not word-for-word translate the voiceover. Rewrite for the footage that should be visible.
+Breadth rules:
+- The primary query is a high-recall category query, not a detailed shot description.
+- Prefer one concrete subject plus one observable action or object. Add at most one necessary context modifier.
+- Remove facts, percentages, explanations, causes, conclusions, moods, camera directions, lighting, and decorative adjectives.
+- Do not add vertical, cinematic, aesthetic, 4k, viral, trending, shocking, or similar style words. The application already filters media type and aspect ratio.
+- Do not use an exact voiceover sentence or a niche factual claim.
+- Fallbacks must change the visual route, not make the primary query longer or more specific.
 
-Good Douyin query patterns:
-- Relationship: 情侣 冷战, 夫妻 日常, 婚后生活, 夫妻 分房睡, 情侣 吵架
-- Parenthood: 宝妈 带娃, 爸爸带娃, 一家三口 日常, 带娃 崩溃
-- Money: 赚钱 日常, 老板 生活, 奢侈品 街拍, 年轻人 买房, 现金 展示
-- Health: 医生 科普, 医院 日常, 体检, 焦虑, 睡眠 问题
-- Crime or mystery: 监控 画面, 真实事件, 反转, 采访, 警方 通报
-- AI or tech: 人工智能, 机器人, 程序员 日常, 黑客, 科技感
-- Productivity: 学习 自律, 上班族 崩溃, 手机 成瘾, 熬夜 工作
-- Beauty or fashion: 街拍, 穿搭, 妆容, 日系 女生, 反应
-- Food: 做饭 日常, 美食 制作, 厨房, 吃播, 街头 小吃
-- Travel: 城市 街拍, 旅行 日常, 东京 街头, 夜景, 人流
+Raw-footage rules:
+- Favor ordinary observable actions: walking, cooking, working, shopping, entering a home, playing, reacting, using an object, or a real environment.
+- For Douyin, use simplified Chinese creator language with 2-4 short terms. Always write Chinese for Douyin even when the footage is about Japan, Korea, or another country. Never output Japanese kana or Japanese spellings. For example, use 玄关, 实拍, 孩子, 袜子, and 榻榻米, not 玄関, 実写, 子供, 靴下, or 畳. 实拍, 日常, or 随手拍 may be used only when the query remains broad.
+- For Pinterest, use 2-6 simple English words. "video" or "raw footage" may be appended, but the content phrase must remain broad.
+- Avoid terms that attract text-heavy or edited results: explainer, facts, tips, meaning, tutorial, podcast, news, interview, compilation, edit, meme, quote, lyrics, slideshow, 科普, 解说, 盘点, 合集, 教程, 文案, 语录, 混剪, 剪辑.
 
-Good Pinterest query patterns:
-- relationship: couple awkward silence vertical video, couple backs turned in bed video
-- parenthood: tired mom kitchen vertical video, parents with kids at home video
-- money: luxury lifestyle money aesthetic video, cash counting close up vertical video
-- health: doctor consultation vertical video, hospital hallway cinematic video
-- crime or mystery: cctv footage dark street, police tape cinematic vertical video
-- AI or tech: futuristic computer screen video, programmer desk night vertical video
-- productivity: stressed office worker vertical video, phone addiction close up video
-- food: cooking close up vertical video, street food preparation video
-- travel: tokyo street night vertical video, city walking pov vertical video
+Hook rule:
+- Scene 1 may use a stronger visual proxy, but it must still preserve the true project anchor. Relevance is more important than a generic beauty or reaction hook.
 
-Avoid:
-- exact voiceover sentences
-- statistics as search keywords
-- moral judgments or conclusions
-- abstract phrases without a visible subject
-- sentence fragments such as "it is not", "last one", "normal or sad"
-- generic terms like viral, trending, shocking, crazy without a visible subject
-- podcast, news screenshots, anime, slideshows, lyrics, heavy captions, unrelated memes
+Granularity examples only; never copy their topic into another project:
+- Street shoes carry bacteria -> 玄关 脱鞋 日常 / taking shoes off at home video
+- A cat's slow blink signals trust -> 猫咪 慢眨眼 / cat slow blink video
+- AI saves office time -> 上班族 电脑办公 / office worker using laptop video
+- Grocery prices rose -> 超市 买菜 实拍 / grocery shopping video
+- Romance disappeared, in a relationship project -> 情侣 冷战 日常 / couple sitting apart video
 
-Output constraints:
-- Each scene must have exactly one primary Douyin keyword.
-- Each scene must have exactly one primary Pinterest keyword.
-- Each source may have up to 2 fallback keywords.
-- Keep fallbacks meaningfully different from the primary keyword.
-- The UI will show only the primary keyword by default, so make it strong.
+Critical counterexample:
+- If the project is about Japanese home customs, shoes, tatami, or hygiene, never output couple conflict, dating, or bedroom footage merely because "Japan" or "family" appears.
+
+Before returning, silently reject and rewrite any scene where:
+- content_anchor is absent from the project or script context;
+- the query introduces a new story or unsupported person;
+- the query has more than one subject, one action, and one context modifier;
+- the likely results are explainers, edits, caption-heavy posts, or an overly narrow staged shot.
 
 Return exactly this JSON shape:
 {
+  "project_anchor": "",
   "global_hook_strategy": {
     "domain": "",
     "hook_type": "",
@@ -80,6 +74,8 @@ Return exactly this JSON shape:
     {
       "scene_id": "",
       "retention_role": "hook|setup|evidence|escalation|twist|payoff|bridge",
+      "content_anchor": "",
+      "visible_action": "",
       "visual_intent": "",
       "visual_archetype": "",
       "douyin_primary_keyword": "",
@@ -180,11 +176,7 @@ class DeepSeekScriptClient:
         *,
         project_idea: str,
         full_script: str,
-        scene_id: str,
-        scene_order: int,
-        voiceover_text: str,
-        visual_brief: str,
-        on_screen_text: str,
+        scenes: list[dict],
         language: str,
         target_style: str = "mixed",
     ) -> dict:
@@ -197,15 +189,7 @@ class DeepSeekScriptClient:
             "full_script": full_script,
             "language": language,
             "target_style": target_style,
-            "scenes": [
-                {
-                    "scene_id": scene_id,
-                    "order": scene_order,
-                    "voiceover_text": voiceover_text,
-                    "on_screen_text": on_screen_text,
-                    "visual_brief": visual_brief,
-                }
-            ],
+            "scenes": scenes,
         }
         try:
             async with httpx.AsyncClient(timeout=35.0) as client:
@@ -218,7 +202,7 @@ class DeepSeekScriptClient:
                             {"role": "system", "content": VISUAL_SEARCH_SYSTEM_PROMPT},
                             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                         ],
-                        "temperature": 0.35,
+                        "temperature": 0.15,
                     },
                 )
                 response.raise_for_status()

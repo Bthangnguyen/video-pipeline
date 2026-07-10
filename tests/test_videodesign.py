@@ -884,17 +884,23 @@ def test_videodesign_smart_keywords_feed_material_search(monkeypatch):
     plan_response = client.post(f"/api/videodesign/projects/{project_id}/plan")
     scene_id = plan_response.json()["scenes"][0]["scene_id"]
     seen_keywords = []
+    visual_calls = []
 
     async def fake_visual_keywords(**kwargs):
+        visual_calls.append(kwargs["scenes"])
+        input_scene = kwargs["scenes"][0]
         return {
+            "project_anchor": "cat",
             "scenes": [
                 {
-                    "scene_id": kwargs["scene_id"],
+                    "scene_id": input_scene["scene_id"],
                     "retention_role": "hook",
+                    "content_anchor": "cat",
+                    "visible_action": "reacting",
                     "visual_intent": "cat reacting to a voice",
                     "visual_archetype": "cat close up",
                     "douyin_primary_keyword": "猫咪 反应",
-                    "pinterest_primary_keyword": "cat close up vertical video",
+                    "pinterest_primary_keyword": "cat reacting video",
                     "fallbacks": {"douyin": ["猫咪 日常"], "pinterest": ["cat reacting video"]},
                     "avoid": [],
                     "material_notes": "Prefer real cat footage.",
@@ -921,24 +927,48 @@ def test_videodesign_smart_keywords_feed_material_search(monkeypatch):
             ],
         )
 
+    async def fake_pinterest_search(request):
+        return PinterestSearchResponse(
+            keyword=request.keyword,
+            media_type="video",
+            aspect_ratio="9:16",
+            items=[
+                PublicPinterestResult(
+                    result_id="smart-pin-result",
+                    pin_id="smart-pin",
+                    title="cat reacting",
+                    media_type="video",
+                    media_url="/pin-media",
+                    stream_url="/pin-stream",
+                    download_url="/pin-download",
+                    cover_url="/pin-cover",
+                    width=576,
+                    height=1024,
+                    aspect_ratio="9:16",
+                )
+            ],
+        )
+
     monkeypatch.setattr(videodesign_service.script_client, "generate_visual_search_keywords", fake_visual_keywords)
     monkeypatch.setattr(douyin_service, "search", fake_search)
+    monkeypatch.setattr(pinterest_service, "search", fake_pinterest_search)
 
     response = client.post(
         f"/api/videodesign/projects/{project_id}/materials/search",
         json={
             "scene_ids": [scene_id],
             "douyin_min_per_scene": 1,
-            "pinterest_min_per_scene": 0,
+            "pinterest_min_per_scene": 1,
             "queries_per_scene": 1,
             "use_smart_keywords": True,
         },
     )
 
     assert response.status_code == 200
+    assert len(visual_calls) == 1
     assert seen_keywords == ["猫咪 反应"]
     scene = response.json()["rows"][0]["scene"]
-    assert scene["matching_keywords"][0] == "cat close up vertical video"
+    assert scene["matching_keywords"][0] == "cat reacting video"
     assert scene["visual_search_plan"]["douyin_primary_keyword"] == "猫咪 反应"
 
 
@@ -949,15 +979,19 @@ def test_videodesign_keyword_generation_endpoint_updates_scene(monkeypatch):
     scene_id = plan_response.json()["scenes"][0]["scene_id"]
 
     async def fake_visual_keywords(**kwargs):
+        input_scene = kwargs["scenes"][0]
         return {
+            "project_anchor": "cat",
             "scenes": [
                 {
-                    "scene_id": kwargs["scene_id"],
+                    "scene_id": input_scene["scene_id"],
                     "retention_role": "hook",
+                    "content_anchor": "cat",
+                    "visible_action": "reacting",
                     "visual_intent": "cat reacting to a voice",
                     "visual_archetype": "cat close up",
                     "douyin_primary_keyword": "猫咪 反应",
-                    "pinterest_primary_keyword": "cat close up vertical video",
+                    "pinterest_primary_keyword": "cat reacting video",
                     "fallbacks": {"douyin": ["猫咪 日常"], "pinterest": ["cat reacting video"]},
                     "avoid": [],
                     "material_notes": "Prefer real cat footage.",
@@ -975,8 +1009,107 @@ def test_videodesign_keyword_generation_endpoint_updates_scene(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["errors"] == []
-    assert body["scenes"][0]["matching_keywords"] == ["cat close up vertical video"]
+    assert body["scenes"][0]["matching_keywords"] == ["cat reacting video"]
     assert body["scenes"][0]["visual_search_plan"]["douyin_primary_keyword"] == "猫咪 反应"
+
+
+def test_videodesign_keyword_generation_plans_all_scenes_in_one_call(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    scenes = client.post(f"/api/videodesign/projects/{project_id}/plan").json()["scenes"]
+    calls = []
+
+    async def fake_visual_keywords(**kwargs):
+        calls.append(kwargs["scenes"])
+        return {
+            "project_anchor": "cat",
+            "scenes": [
+                {
+                    "scene_id": item["scene_id"],
+                    "retention_role": "hook" if item["order"] == 1 else "evidence",
+                    "content_anchor": "cat",
+                    "visible_action": "playing",
+                    "visual_intent": "real cat behavior",
+                    "visual_archetype": "cat behavior",
+                    "douyin_primary_keyword": "猫咪 日常",
+                    "pinterest_primary_keyword": "cat playing video",
+                    "fallbacks": {"douyin": [], "pinterest": []},
+                    "avoid": [],
+                    "material_notes": "Prefer ordinary cat footage.",
+                }
+                for item in kwargs["scenes"]
+            ],
+        }
+
+    monkeypatch.setattr(videodesign_service.script_client, "generate_visual_search_keywords", fake_visual_keywords)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/keywords/generate",
+        json={"scene_ids": None},
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert {item["scene_id"] for item in calls[0]} == {scene["scene_id"] for scene in scenes}
+    assert response.json()["errors"] == []
+    assert all(scene["visual_search_plan"]["query_strategy"] == "broad_grounded_v2" for scene in response.json()["scenes"])
+
+
+def test_videodesign_keyword_generation_rejects_off_topic_story(monkeypatch):
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/videodesign/projects",
+        json={
+            "idea": "japan family",
+            "script": "In Japan, taking off shoes at the genkan keeps street dirt outside. Tatami floors stay cleaner.",
+            "target_duration_seconds": 18,
+            "language": "en",
+        },
+    )
+    project_id = create_response.json()["project"]["project_id"]
+    scenes = client.post(f"/api/videodesign/projects/{project_id}/plan").json()["scenes"]
+
+    async def fake_visual_keywords(**kwargs):
+        return {
+            "project_anchor": "Japanese home",
+            "scenes": [
+                {
+                    "scene_id": item["scene_id"],
+                    "retention_role": "evidence",
+                    "content_anchor": "couple",
+                    "visible_action": "sitting apart",
+                    "visual_intent": "relationship tension",
+                    "visual_archetype": "couple conflict",
+                    "douyin_primary_keyword": "日本夫妻 冷战 沙发",
+                    "pinterest_primary_keyword": "Japanese couple sitting apart sofa vertical video",
+                    "fallbacks": {"douyin": [], "pinterest": []},
+                    "avoid": [],
+                    "material_notes": "",
+                }
+                for item in kwargs["scenes"]
+            ],
+        }
+
+    monkeypatch.setattr(videodesign_service.script_client, "generate_visual_search_keywords", fake_visual_keywords)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/keywords/generate",
+        json={"scene_ids": None},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["errors"]) == len(scenes)
+    assert all(scene["visual_search_plan"]["query_strategy"] == "fallback_ungrounded" for scene in body["scenes"])
+    assert all("couple" not in scene["visual_search_plan"]["pinterest_primary_keyword"].lower() for scene in body["scenes"])
+
+
+def test_videodesign_visual_queries_remove_niche_style_terms_and_japanese_spellings():
+    assert videodesign_service_module._normalize_pinterest_visual_query(
+        "cat cinematic close up vertical video"
+    ) == "cat video"
+    assert videodesign_service_module._normalize_douyin_visual_query("玄関 実写 靴下") == "玄关 实拍 袜子"
+    assert videodesign_service_module._normalize_douyin_visual_query("家族 団らん 実写") == ""
 
 
 def test_videodesign_smart_keyword_failure_falls_back_during_search(monkeypatch):

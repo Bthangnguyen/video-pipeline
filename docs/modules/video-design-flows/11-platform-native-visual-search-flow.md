@@ -1,6 +1,19 @@
 # 11 Platform-Native Visual Search Flow
 
-Status: draft.
+Status: implemented with broad-grounded V2 corrections.
+
+Current prompt and guardrail contract: [`../prompts/visual-search-director-system-prompt.md`](../prompts/visual-search-director-system-prompt.md).
+
+V2 supersedes any older example below that adds `vertical`, `cinematic`, `aesthetic`, detailed lighting, or an unsupported visual proxy to a primary query. Media type and aspect ratio are application filters, not keyword content.
+
+Implementation correction after product testing:
+
+- generate all selected scenes in one DeepSeek request;
+- establish a grounded `content_anchor` before writing either source query;
+- optimize for relevance, search breadth, and raw-footage likelihood before hook strength;
+- never reuse another scene's result when a scene ID is missing;
+- reject plans whose anchor is absent from the script context;
+- generate once for both sources and preserve user-edited keywords during search.
 
 ## Goal
 
@@ -78,7 +91,7 @@ Do not generate one universal keyword and translate it mechanically.
 For each scene:
 
 - `douyin_primary_keyword`: simplified Chinese, 2-6 short terms, creator/search language.
-- `pinterest_primary_keyword`: English, visual/stock/aesthetic language, usually includes `video` or `vertical video`.
+- `pinterest_primary_keyword`: broad English subject/action language, 2-6 words; `video` or `raw footage` is optional.
 - `fallback_keywords`: internal retries, not all shown in UI by default.
 
 ### 3. Use Creator-Language Categories

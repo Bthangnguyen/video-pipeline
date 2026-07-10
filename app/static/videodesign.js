@@ -1204,6 +1204,8 @@ function renderVisualSearchNotes(plan) {
   const pinterestFallbacks = plan.fallbacks?.pinterest || [];
   panel.innerHTML = `
     ${plan.retention_role ? `<p><strong>Role</strong> ${escapeHtml(plan.retention_role)}</p>` : ""}
+    ${plan.content_anchor ? `<p><strong>Anchor</strong> ${escapeHtml(plan.content_anchor)}</p>` : ""}
+    ${plan.visible_action ? `<p><strong>Action</strong> ${escapeHtml(plan.visible_action)}</p>` : ""}
     ${plan.visual_archetype ? `<p><strong>Visual</strong> ${escapeHtml(plan.visual_archetype)}</p>` : ""}
     ${plan.material_notes ? `<p>${escapeHtml(plan.material_notes)}</p>` : ""}
     ${douyinFallbacks.length || pinterestFallbacks.length ? `
