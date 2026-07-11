@@ -92,7 +92,17 @@ from app.videodesign.materials.search_plan import (
 )
 from app.videodesign.materials.service import MaterialsService
 from app.videodesign.planner import estimate_duration, make_caption_chunks, refresh_scene_orders, split_script
-from app.videodesign.project_state import _scene, _selected_scenes
+from app.videodesign.project_state import (
+    _delete_project_file,
+    _mark_preview_stale,
+    _project_sort_value,
+    _project_summary,
+    _project_title,
+    _renderable_scenes,
+    _reset_smooth_preview,
+    _scene,
+    _selected_scenes,
+)
 from app.videodesign.schemas import (
     CreateProjectRequest,
     DouyinSearchTask,
@@ -131,6 +141,7 @@ from app.videodesign.schemas import (
 from app.videodesign.script_client import DeepSeekScriptClient
 from app.videodesign.store import VideoDesignStore
 from app.videodesign.tts import TTSClient
+from app.videodesign.voiceover_service import VoiceoverService
 
 
 
@@ -313,6 +324,7 @@ class VideoDesignService:
         self.tts_client = TTSClient()
         self.ytdlp = YtDlpDownloader()
         self.materials = MaterialsService(self.store, self.script_client, self.ytdlp)
+        self.voiceover = VoiceoverService(self.store, self.tts_client)
 
     def health(self) -> dict:
         return {
@@ -471,171 +483,17 @@ class VideoDesignService:
         return {"success": True, "scenes": [item.model_dump() for item in project.scenes]}
 
     async def generate_tts(self, project_id: str, request: TTSGenerateRequest) -> dict:
-        project = self.store.get(project_id)
-        provider = request.provider or project.tts_settings.provider
-        voice_id = request.voice_id or project.tts_settings.voice_id
-        voice_speed = float(request.voice_speed or project.tts_settings.voice_speed or 1)
-        if not request.scene_ids:
-            return await self._generate_global_tts(project, provider, voice_id, voice_speed)
-        scenes = _selected_scenes(project, request.scene_ids)
-        for scene in scenes:
-            text = scene.tts_text or scene.voiceover_text
-            _delete_project_file(project, scene.tts.audio_path)
-            result = await self.tts_client.generate(text, project.project_id, scene.scene_id, provider, voice_id, voice_speed)
-            previous_duration = scene.duration_seconds
-            scene.duration_seconds = result.duration_seconds
-            if scene.clip and previous_duration and abs(scene.clip.duration_seconds - result.duration_seconds) > 0.05:
-                scene.clip.status = "trim_stale"
-            scene.caption_chunks = result.caption_chunks
-            scene.tts = TTSMeta(
-                provider=provider,
-                voice_id=voice_id,
-                audio_url=f"/api/videodesign/projects/{project.project_id}/scenes/{scene.scene_id}/audio",
-                audio_path=str(result.audio_path),
-                duration_seconds=result.duration_seconds,
-                sync_state="synced",
-            )
-        project.tts_settings = TTSSettings(language=project.language, provider=provider, voice_id=voice_id, voice_speed=voice_speed)
-        _delete_project_file(project, project.voiceover_track.audio_path)
-        project.voiceover_track = VoiceoverTrack()
-        self.store.put(project)
-        return {"success": True, "project": project.model_dump(), "scenes": [scene.model_dump() for scene in scenes]}
+        return await self.voiceover.generate_tts(project_id, request)
 
-    async def _generate_global_tts(self, project: VideoDesignProject, provider: str, voice_id: str, voice_speed: float) -> dict:
-        scenes = _renderable_scenes(project)
-        if not scenes:
-            raise VideoDesignError(SCENE_NOT_READY, "Project has no scenes for TTS.")
-        for scene in project.scenes:
-            _delete_project_file(project, scene.tts.audio_path)
-            scene.tts = TTSMeta()
-        _delete_project_file(project, project.voiceover_track.audio_path)
-
-        scene_texts = [scene.tts_text or scene.voiceover_text for scene in scenes]
-        full_text = " ".join(text.strip() for text in scene_texts if text.strip()).strip()
-        if not full_text:
-            raise VideoDesignError(SCRIPT_REQUIRED, "No scene voiceover text is available for TTS.")
-
-        result = await self.tts_client.generate(full_text, project.project_id, "global_voiceover", provider, voice_id, voice_speed)
-        offsets = _assign_global_tts_offsets(scenes, result.duration_seconds)
-        for scene, offset in zip(scenes, offsets):
-            duration = round(max(0.05, offset.end_seconds - offset.start_seconds), 3)
-            previous_duration = scene.duration_seconds
-            scene.duration_seconds = duration
-            if scene.clip and previous_duration and abs(scene.clip.duration_seconds - duration) > 0.05:
-                scene.clip.status = "trim_stale"
-            text = scene.caption_text or scene.tts_text or scene.voiceover_text
-            scene.caption_chunks = make_caption_chunks(text, duration)
-            scene.tts = TTSMeta(
-                provider=provider,
-                voice_id=voice_id,
-                duration_seconds=duration,
-                sync_state="synced",
-            )
-
-        project.voiceover_track = VoiceoverTrack(
-            audio_url=f"/api/videodesign/projects/{project.project_id}/audio/combined",
-            audio_path=str(result.audio_path),
-            duration_seconds=round(result.duration_seconds, 3),
-            scene_offsets=offsets,
-        )
-        project.tts_settings = TTSSettings(language=project.language, provider=provider, voice_id=voice_id, voice_speed=voice_speed)
-        project.timeline = None
-        _reset_smooth_preview(project)
-        self.store.put(project)
-        return {
-            "success": True,
-            "project": project.model_dump(),
-            "voiceover_track": project.voiceover_track.model_dump(),
-            "scenes": [scene.model_dump() for scene in scenes],
-        }
 
     def clear_tts(self, project_id: str) -> dict:
-        project = self.store.get(project_id)
-        deleted = 0
-        for scene in project.scenes:
-            if _delete_project_file(project, scene.tts.audio_path):
-                deleted += 1
-            text = scene.tts_text or scene.voiceover_text
-            scene.tts = TTSMeta()
-            scene.caption_chunks = make_caption_chunks(text, estimate_duration(text))
-            scene.duration_seconds = estimate_duration(text)
-            if scene.clip:
-                scene.clip.status = "trim_stale"
-        if _delete_project_file(project, project.voiceover_track.audio_path):
-            deleted += 1
-        project.voiceover_track = VoiceoverTrack()
-        project.timeline = None
-        _reset_smooth_preview(project)
-        self.store.put(project)
-        return {
-            "success": True,
-            "deleted_files": deleted,
-            "project": project.model_dump(),
-            "scenes": [scene.model_dump() for scene in project.scenes],
-        }
+        return self.voiceover.clear_tts(project_id)
 
     def build_combined_voiceover(self, project_id: str) -> dict:
-        project = self.store.get(project_id)
-        if project.voiceover_track.audio_path and Path(project.voiceover_track.audio_path).exists():
-            return {"success": True, "voiceover_track": project.voiceover_track.model_dump()}
-        scenes = _renderable_scenes(project)
-        if not scenes:
-            raise VideoDesignError(SCENE_NOT_READY, "Project has no renderable scenes.")
-
-        audio_paths: list[Path] = []
-        offsets: list[SceneAudioOffset] = []
-        current = 0.0
-        for scene in scenes:
-            if not scene.tts.audio_path:
-                raise VideoDesignError(AUDIO_NOT_FOUND, f"Scene {scene.scene_id} has no generated TTS audio.")
-            audio_path = Path(scene.tts.audio_path)
-            if not audio_path.exists():
-                raise VideoDesignError(AUDIO_NOT_FOUND, f"Scene audio file does not exist: {scene.scene_id}.")
-            duration = measure_audio_duration(audio_path) or scene.tts.duration_seconds or scene.duration_seconds
-            if duration <= 0:
-                raise VideoDesignError(AUDIO_NOT_FOUND, f"Could not measure scene audio duration: {scene.scene_id}.")
-            scene.duration_seconds = duration
-            scene.tts.duration_seconds = duration
-            scene.caption_chunks = make_caption_chunks(scene.caption_text or scene.tts_text or scene.voiceover_text, duration)
-            start = current
-            current = round(current + duration, 3)
-            offsets.append(
-                SceneAudioOffset(
-                    scene_id=scene.scene_id,
-                    start_seconds=round(start, 3),
-                    end_seconds=current,
-                )
-            )
-            audio_paths.append(audio_path)
-
-        output_dir = settings.storage_dir / project.project_id / "audio"
-        try:
-            combined_path, combined_duration = concatenate_audio_files(audio_paths, output_dir)
-        except ValueError as exc:
-            raise VideoDesignError(AUDIO_COMBINE_FAILED, f"Could not combine scene audio: {exc}", retryable=True) from exc
-
-        if combined_duration <= 0:
-            combined_duration = current
-        project.voiceover_track = VoiceoverTrack(
-            audio_url=f"/api/videodesign/projects/{project.project_id}/audio/combined",
-            audio_path=str(combined_path),
-            duration_seconds=round(combined_duration, 3),
-            scene_offsets=offsets,
-        )
-        if project.timeline:
-            project.timeline.duration_seconds = round(combined_duration, 3)
-            _mark_preview_stale(project)
-        self.store.put(project)
-        return {"success": True, "voiceover_track": project.voiceover_track.model_dump()}
+        return self.voiceover.build_combined_voiceover(project_id)
 
     def combined_voiceover_path(self, project_id: str) -> Path:
-        project = self.store.get(project_id)
-        if not project.voiceover_track.audio_path:
-            raise VideoDesignError(AUDIO_NOT_FOUND, "Combined voiceover has not been created.")
-        path = Path(project.voiceover_track.audio_path)
-        if not path.exists():
-            raise VideoDesignError(AUDIO_NOT_FOUND, "Combined voiceover file does not exist.", retryable=True)
-        return path
+        return self.voiceover.combined_voiceover_path(project_id)
 
     async def generate_scene_keywords(self, project_id: str, request: KeywordGenerateRequest) -> dict:
         return await self.materials.generate_scene_keywords(project_id, request)
@@ -1092,52 +950,10 @@ class VideoDesignService:
 
 
 
-def _renderable_scenes(project: VideoDesignProject) -> list[ScenePlan]:
-    return [scene for scene in project.scenes if scene.approval_state != "placeholder_allowed"]
 
 
-def _assign_global_tts_offsets(scenes: list[ScenePlan], total_duration: float) -> list[SceneAudioOffset]:
-    if not scenes:
-        return []
-    safe_total = round(max(0.05, total_duration), 3)
-    weights = [max(0.05, estimate_duration(scene.tts_text or scene.voiceover_text)) for scene in scenes]
-    total_weight = sum(weights) or len(scenes)
-    offsets: list[SceneAudioOffset] = []
-    current = 0.0
-    for index, scene in enumerate(scenes):
-        if index == len(scenes) - 1:
-            end = safe_total
-        else:
-            duration = safe_total * (weights[index] / total_weight)
-            end = min(safe_total, round(current + max(0.05, duration), 3))
-        offsets.append(
-            SceneAudioOffset(
-                scene_id=scene.scene_id,
-                start_seconds=round(current, 3),
-                end_seconds=round(max(end, current + 0.05), 3),
-            )
-        )
-        current = offsets[-1].end_seconds
-    offsets[-1].end_seconds = safe_total
-    return offsets
 
 
-def _delete_project_file(project: VideoDesignProject, file_path: str) -> bool:
-    if not file_path:
-        return False
-    try:
-        path = Path(file_path).resolve()
-        project_root = (settings.storage_dir / project.project_id).resolve()
-        path.relative_to(project_root)
-    except (OSError, ValueError):
-        return False
-    if not path.exists() or not path.is_file():
-        return False
-    try:
-        path.unlink()
-        return True
-    except OSError:
-        return False
 
 
 
@@ -1611,73 +1427,16 @@ def _clamp_sfx_volume(value: float) -> float:
     return round(max(0.0, min(1.0, number)), 3)
 
 
-def _mark_preview_stale(project: VideoDesignProject) -> None:
-    preview = project.smooth_preview
-    if preview.preview_path and Path(preview.preview_path).exists():
-        preview.status = "stale"
-    else:
-        preview.status = "missing"
-        preview.preview_url = ""
-        preview.preview_path = ""
-    if project.timeline:
-        preview.timeline_id = project.timeline.timeline_id
 
 
-def _reset_smooth_preview(project: VideoDesignProject) -> None:
-    _delete_project_file(project, project.smooth_preview.preview_path)
-    project.smooth_preview = SmoothPreview()
 
 
-def _project_sort_value(project: VideoDesignProject) -> str:
-    return project.smooth_preview.updated_at or project.created_at or project.project_id
 
 
-def _project_title(project: VideoDesignProject) -> str:
-    text = (project.idea or project.script or project.project_id).strip()
-    first_line = next((line.strip() for line in text.splitlines() if line.strip()), project.project_id)
-    return first_line[:90]
 
 
-def _project_stage(project: VideoDesignProject) -> str:
-    if project.smooth_preview.status == "ready" and project.smooth_preview.preview_path:
-        return "export_ready"
-    if project.timeline:
-        return "studio"
-    if any(scene.material_asset_id for scene in project.scenes):
-        return "materials_downloaded"
-    if project.candidates:
-        return "review_materials"
-    if project.scenes:
-        return "plan"
-    if project.script.strip():
-        return "script"
-    return "idea"
 
 
-def _project_summary(project: VideoDesignProject) -> dict:
-    approved_count = sum(1 for scene in project.scenes if scene.selected_candidate_id)
-    downloaded_count = sum(1 for scene in project.scenes if scene.material_asset_id)
-    export_ready = bool(
-        project.smooth_preview.status == "ready"
-        and project.smooth_preview.preview_path
-        and Path(project.smooth_preview.preview_path).exists()
-    )
-    return {
-        "project_id": project.project_id,
-        "title": _project_title(project),
-        "stage": _project_stage(project),
-        "created_at": project.created_at,
-        "target_duration_seconds": project.target_duration_seconds,
-        "aspect_ratio": project.aspect_ratio,
-        "scene_count": len(project.scenes),
-        "candidate_count": len(project.candidates),
-        "approved_count": approved_count,
-        "downloaded_count": downloaded_count,
-        "has_timeline": bool(project.timeline),
-        "timeline_duration_seconds": project.timeline.duration_seconds if project.timeline else 0,
-        "preview_status": project.smooth_preview.status,
-        "export_ready": export_ready,
-    }
 
 
 def _smooth_preview_url(project_id: str, updated_at: str) -> str:
