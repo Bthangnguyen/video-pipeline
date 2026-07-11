@@ -323,6 +323,7 @@ def _sfx_asset(asset_id: str) -> SFXAsset:
     return _generated_sfx_asset(asset_id)
 
 
+@lru_cache(maxsize=1)
 def _static_sfx_catalog_assets() -> tuple[SFXAsset, ...]:
     catalog_path = STATIC_SFX_ROOT / "catalog.json"
     if not catalog_path.exists():
