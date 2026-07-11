@@ -7,6 +7,7 @@ SplitMode = Literal["auto", "dense", "normal", "sparse", "manual"]
 ApprovalState = Literal["planned", "searching", "needs_review", "approved", "download_pending", "downloaded", "rejected", "placeholder_allowed"]
 CandidateStatus = Literal["proposed", "approved", "rejected"]
 SFXSuggestionStatus = Literal["proposed", "applied", "skipped"]
+SearchGroupRole = Literal["hook", "base", "exact"]
 
 
 class SplitSettings(BaseModel):
@@ -87,6 +88,7 @@ class ScenePlan(BaseModel):
     matching_keywords: list[str] = Field(default_factory=list)
     negative_keywords: list[str] = Field(default_factory=list)
     visual_search_plan: dict[str, Any] = Field(default_factory=dict)
+    search_group_id: str = ""
     template_scene_id: str = ""
     duration_seconds: float = 0
     search_tasks: list[str] = Field(default_factory=list)
@@ -101,6 +103,7 @@ class DouyinSearchTask(BaseModel):
     search_task_id: str
     project_id: str
     scene_id: str
+    search_group_id: str = ""
     source: str = "douyinsearch"
     keyword: str
     translate_to_chinese: bool = True
@@ -115,6 +118,7 @@ class MediaCandidate(BaseModel):
     candidate_id: str
     source: str = "douyinsearch"
     scene_id: str
+    search_group_id: str = ""
     source_result_id: str = ""
     source_item_id: str = ""
     source_url: str = ""
@@ -129,8 +133,28 @@ class MediaCandidate(BaseModel):
     remote_stream_url: str = ""
     remote_download_url: str = ""
     duration: float = 0
+    source_rank: int = 0
+    stats: dict[str, Any] = Field(default_factory=dict)
+    popularity: dict[str, Any] = Field(default_factory=dict)
     match_reason: str = ""
     status: CandidateStatus = "proposed"
+
+
+class MaterialSearchGroup(BaseModel):
+    group_id: str
+    role: SearchGroupRole = "base"
+    label: str = ""
+    exact_subject: str = ""
+    douyin_keyword: str = ""
+    pinterest_keyword: str = ""
+    douyin_fallback: str = ""
+    pinterest_fallback: str = ""
+    scene_ids: list[str] = Field(default_factory=list)
+
+
+class MaterialSearchPlan(BaseModel):
+    popular_first: bool = True
+    groups: list[MaterialSearchGroup] = Field(default_factory=list)
 
 
 class MaterialAsset(BaseModel):
@@ -240,6 +264,7 @@ class VideoDesignProject(BaseModel):
     split_settings: SplitSettings = Field(default_factory=SplitSettings)
     tts_settings: TTSSettings = Field(default_factory=TTSSettings)
     scenes: list[ScenePlan] = Field(default_factory=list)
+    material_search_plan: MaterialSearchPlan = Field(default_factory=MaterialSearchPlan)
     search_tasks: list[DouyinSearchTask] = Field(default_factory=list)
     candidates: list[MediaCandidate] = Field(default_factory=list)
     material_assets: list[MaterialAsset] = Field(default_factory=list)
@@ -287,12 +312,14 @@ class KeywordGenerateRequest(BaseModel):
 
 class MaterialsSearchRequest(BaseModel):
     scene_ids: list[str] | None = None
+    group_ids: list[str] | None = None
     candidates_per_scene: int = Field(default=5, ge=1, le=10)
     douyin_min_per_scene: int | None = Field(default=None, ge=0, le=10)
     pinterest_min_per_scene: int = Field(default=0, ge=0, le=10)
     queries_per_scene: int = Field(default=2, ge=1, le=3)
     translate_to_chinese: bool = True
     use_smart_keywords: bool = False
+    popular_first: bool | None = None
 
 
 class MaterialsPreflightRequest(BaseModel):

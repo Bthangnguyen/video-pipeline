@@ -42,3 +42,11 @@ def test_parse_dom_cards_deduplicates_video_ids():
 
     assert [result.douyin_aweme_id for result in results] == ["1", "2"]
 
+
+def test_parse_dom_cards_normalizes_visible_like_count():
+    results = parse_dom_cards(
+        [{"href": "https://www.douyin.com/video/1", "title": "one", "like_text": "12.3万"}],
+        10,
+    )
+
+    assert results[0].stats["digg_count"] == 123000

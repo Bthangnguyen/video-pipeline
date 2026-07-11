@@ -11,6 +11,7 @@ from app.videodesign.schemas import (
     MaterialsPreflightRequest,
     MaterialsPruneRequest,
     MaterialsSearchRequest,
+    MaterialSearchPlan,
     SceneClipPatch,
     SceneSelectionRequest,
     SFXApplyRequest,
@@ -153,6 +154,14 @@ async def clear_tts(project_id: str):
 async def generate_keywords(project_id: str, request: KeywordGenerateRequest):
     try:
         return await videodesign_service.generate_scene_keywords(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.patch("/projects/{project_id}/search-plan")
+async def update_search_plan(project_id: str, request: MaterialSearchPlan):
+    try:
+        return videodesign_service.set_material_search_plan(project_id, request)
     except VideoDesignError as error:
         return error_response(error)
 

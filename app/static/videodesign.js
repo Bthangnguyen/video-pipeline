@@ -6,6 +6,7 @@ const state = {
   timeline: null,
   activeView: "start",
   selectedSceneId: "",
+  selectedSearchGroupId: "",
   selectedItemId: "",
   previewCandidateId: "",
   smoothPreview: defaultSmoothPreview(),
@@ -141,7 +142,9 @@ function bindEvents() {
 
   document.getElementById("search-current-scene").addEventListener("click", searchSelectedScene);
   document.getElementById("search-all-scenes").addEventListener("click", searchAllScenes);
+  document.getElementById("generate-material-search-plan").addEventListener("click", generateAllSceneKeywords);
   document.getElementById("save-material-keywords").addEventListener("click", saveMaterialKeywords);
+  document.getElementById("assign-scene-search-group").addEventListener("click", assignSelectedSceneToGroup);
   document.getElementById("run-material-health").addEventListener("click", runMaterialHealth);
   document.getElementById("clear-scene-candidates").addEventListener("click", clearSelectedSceneCandidates);
   document.getElementById("clear-all-candidates").addEventListener("click", clearAllCandidates);
@@ -464,8 +467,17 @@ async function loadReview() {
   if (!state.projectId) return;
   const data = await api(`/api/videodesign/projects/${state.projectId}/review`);
   state.rows = data.rows;
+  if (data.search_plan) {
+    state.project = { ...(state.project || {}), material_search_plan: data.search_plan };
+    const popularToggle = document.getElementById("popular-first");
+    if (popularToggle) popularToggle.checked = data.search_plan.popular_first !== false;
+  }
   if (!state.selectedSceneId || !state.rows.some((row) => row.scene.scene_id === state.selectedSceneId)) {
     selectFirstScene();
+  }
+  const groupIds = new Set(materialSearchGroups().map((group) => group.group_id));
+  if (!groupIds.has(state.selectedSearchGroupId)) {
+    state.selectedSearchGroupId = selectedRow()?.scene?.search_group_id || materialSearchGroups()[0]?.group_id || "";
   }
   renderAll();
 }
@@ -603,6 +615,20 @@ async function saveMaterialKeywords() {
 async function saveMaterialKeywordsDraft(row) {
   const douyinKeyword = inputValue("materials-douyin-keyword").trim();
   const pinterestKeyword = inputValue("materials-pinterest-keyword").trim();
+  const group = selectedMaterialSearchGroup(row);
+  if (group) {
+    const plan = cloneMaterialSearchPlan();
+    const editable = plan.groups.find((item) => item.group_id === group.group_id);
+    if (!editable) return;
+    editable.douyin_keyword = douyinKeyword;
+    editable.pinterest_keyword = pinterestKeyword;
+    const data = await api(`/api/videodesign/projects/${state.projectId}/search-plan`, {
+      method: "PATCH",
+      body: plan,
+    });
+    state.project = { ...(state.project || {}), material_search_plan: data.search_plan };
+    return;
+  }
   const keywords = uniqueValues([pinterestKeyword, douyinKeyword]);
   const visualPlan = {
     ...sceneVisualSearchPlan(row.scene),
@@ -612,6 +638,33 @@ async function saveMaterialKeywordsDraft(row) {
   await api(`/api/videodesign/projects/${state.projectId}/scenes/${row.scene.scene_id}`, {
     method: "PATCH",
     body: { matching_keywords: keywords, visual_search_plan: visualPlan },
+  });
+}
+
+async function assignSelectedSceneToGroup() {
+  const row = selectedRow();
+  const targetGroupId = inputValue("scene-search-group").trim();
+  if (!row || !targetGroupId || row.scene.search_group_id === targetGroupId) return;
+  await run("Moving scene to search pool", async () => {
+    const plan = cloneMaterialSearchPlan();
+    const current = plan.groups.find((group) => (group.scene_ids || []).includes(row.scene.scene_id));
+    if (current?.role === "base" && current.scene_ids.length === 1) {
+      throw new Error("The base pool must keep at least one scene.");
+    }
+    plan.groups.forEach((group) => {
+      group.scene_ids = (group.scene_ids || []).filter((sceneId) => sceneId !== row.scene.scene_id);
+    });
+    const target = plan.groups.find((group) => group.group_id === targetGroupId);
+    if (!target) throw new Error("Selected search group no longer exists.");
+    target.scene_ids.push(row.scene.scene_id);
+    plan.groups = plan.groups.filter((group) => group.scene_ids.length);
+    const data = await api(`/api/videodesign/projects/${state.projectId}/search-plan`, {
+      method: "PATCH",
+      body: plan,
+    });
+    state.project = { ...(state.project || {}), material_search_plan: data.search_plan };
+    state.selectedSearchGroupId = targetGroupId;
+    await loadReview();
   });
 }
 
@@ -635,11 +688,15 @@ async function runMaterialHealth() {
 
 async function searchSelectedScene() {
   const row = selectedRow();
-  if (!row) return;
-  await run("Searching selected scene", async () => {
+  const group = selectedMaterialSearchGroup(row);
+  if (!row || !group) {
+    setStatus("Generate or select a search group first.", "error");
+    return;
+  }
+  await run("Searching selected group", async () => {
     await saveMaterialKeywordsDraft(row);
-    const body = materialSearchBody([row.scene.scene_id]);
-    await api(`/api/videodesign/projects/${state.projectId}/scenes/${row.scene.scene_id}/materials/search`, {
+    const body = materialSearchBody(null, [group.group_id]);
+    await api(`/api/videodesign/projects/${state.projectId}/materials/search`, {
       method: "POST",
       body,
     });
@@ -877,18 +934,19 @@ function rowHasApprovedCandidate(row) {
   return selected?.status === "approved";
 }
 
-function materialSearchBody(sceneIds = null) {
+function materialSearchBody(sceneIds = null, groupIds = null) {
   const douyinMin = Number(inputValue("douyin-min-count", state.preset.scene_media.candidate_count || 0));
   const pinterestMin = Number(inputValue("pinterest-min-count", state.preset.scene_media.pinterest_candidate_count || 0));
-  const queryCount = clamp(Number(inputValue("queries-per-scene", 2)) || 2, 1, 3);
   return {
     scene_ids: sceneIds,
+    group_ids: groupIds,
     candidates_per_scene: Math.max(douyinMin, 1),
     douyin_min_per_scene: douyinMin,
     pinterest_min_per_scene: pinterestMin,
-    queries_per_scene: queryCount,
-    translate_to_chinese: inputChecked("translate-query", true),
-    use_smart_keywords: inputChecked("smart-keywords", false),
+    queries_per_scene: 2,
+    translate_to_chinese: true,
+    use_smart_keywords: false,
+    popular_first: inputChecked("popular-first", true),
   };
 }
 
@@ -972,6 +1030,8 @@ function renderSceneRails() {
   document.querySelectorAll("[data-scene-id]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedSceneId = button.dataset.sceneId;
+      const row = state.rows.find((item) => item.scene.scene_id === state.selectedSceneId);
+      state.selectedSearchGroupId = row?.scene?.search_group_id || state.selectedSearchGroupId;
       renderAll();
     });
   });
@@ -1099,14 +1159,21 @@ function candidateCards(candidates, row, source) {
   return candidates.map((candidate) => {
     const coverSrc = candidateCoverSrc(candidate);
     const coverState = state.materialCoverCache[candidate.candidate_id]?.state || "loading";
+    const orderLabel = candidateOrderLabel(candidate);
+    const usedBy = candidateUsedByScene(candidate, row.scene.scene_id);
+    const likes = Number(candidate.stats?.digg_count || 0);
     return `
       <article class="vd-candidate ${candidate.status === "approved" ? "is-approved" : ""}">
         <img src="${escapeHtml(coverSrc)}" alt="" loading="eager" decoding="async" data-cover-candidate-id="${escapeHtml(candidate.candidate_id)}" data-cover-url="${escapeHtml(candidate.cover_url || "")}" data-cover-state="${escapeHtml(coverState)}">
         <div>
-          <span class="vd-source-badge">${escapeHtml(sourceLabel(candidate.source))}</span>
+          <div class="vd-candidate-badges">
+            <span class="vd-source-badge">${escapeHtml(sourceLabel(candidate.source))}</span>
+            <span class="vd-order-badge" data-applied="${candidate.popularity?.applied === true}">${escapeHtml(orderLabel)}</span>
+          </div>
           <h3>${escapeHtml(candidate.title || candidate.source_item_id || candidate.douyin_aweme_id)}</h3>
           <p>${escapeHtml(candidate.match_reason)}</p>
-          <p>${formatDuration(candidate.duration)} / ${escapeHtml(candidate.source_item_id || candidate.douyin_aweme_id)}</p>
+          <p>${formatDuration(candidate.duration)}${likes ? ` / ${escapeHtml(formatCompactCount(likes))} likes` : ""}</p>
+          ${usedBy ? `<p class="vd-used-note">Also selected in Scene ${usedBy.scene.order}</p>` : ""}
           <div class="vd-button-row">
             <button data-approve-candidate="${candidate.candidate_id}" data-approve-scene="${row.scene.scene_id}" type="button">${candidate.status === "approved" ? "Approved" : "Approve"}</button>
             <button data-preview-candidate="${candidate.candidate_id}" type="button">Preview</button>
@@ -1116,6 +1183,31 @@ function candidateCards(candidates, row, source) {
       </article>
     `;
   }).join("");
+}
+
+function candidateOrderLabel(candidate) {
+  if (candidate.source === "pinterestsearch") return "Platform order";
+  if (candidate.popularity?.applied) return "Popular";
+  if (candidate.popularity?.requested) return "Popular unavailable";
+  return "Relevance";
+}
+
+function candidateUsedByScene(candidate, currentSceneId) {
+  const sourceId = candidate.source_result_id || candidate.source_item_id || candidate.douyin_aweme_id;
+  if (!sourceId) return null;
+  return state.rows.find((row) => {
+    if (row.scene.scene_id === currentSceneId || !row.scene.selected_candidate_id) return false;
+    const selected = row.candidates.find((item) => item.candidate_id === row.scene.selected_candidate_id);
+    const selectedSourceId = selected?.source_result_id || selected?.source_item_id || selected?.douyin_aweme_id;
+    return selected?.source === candidate.source && selectedSourceId === sourceId;
+  }) || null;
+}
+
+function formatCompactCount(value) {
+  const number = Number(value || 0);
+  if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(number >= 10_000_000 ? 0 : 1)}M`;
+  if (number >= 1_000) return `${(number / 1_000).toFixed(number >= 100_000 ? 0 : 1)}K`;
+  return String(Math.round(number));
 }
 
 function candidateCoverSrc(candidate) {
@@ -1168,8 +1260,19 @@ function hydrateCandidateCoverImages(container) {
 }
 
 function renderMaterialControls(row) {
+  const group = selectedMaterialSearchGroup(row);
   const plan = sceneVisualSearchPlan(row?.scene);
-  const keywords = materialKeywordsForScene(row?.scene);
+  const keywords = group
+    ? { douyin: group.douyin_keyword || "", pinterest: group.pinterest_keyword || "" }
+    : materialKeywordsForScene(row?.scene);
+  renderMaterialSearchGroups();
+  const title = document.getElementById("materials-group-title");
+  const role = document.getElementById("materials-group-role");
+  if (title) title.textContent = group?.label || "Select a search group";
+  if (role) {
+    role.textContent = titleCase(group?.role || "base");
+    role.dataset.role = group?.role || "base";
+  }
   const chips = document.getElementById("materials-keyword-chips");
   if (chips) {
     chips.innerHTML = keywords.douyin || keywords.pinterest
@@ -1187,27 +1290,70 @@ function renderMaterialControls(row) {
   }
   setInputValue("materials-douyin-keyword", keywords.douyin || "");
   setInputValue("materials-pinterest-keyword", keywords.pinterest || "");
-  renderVisualSearchNotes(plan);
+  renderSceneSearchGroupSelect(row, group);
+  renderVisualSearchNotes(plan, group);
   renderSearchErrors(row);
   renderMaterialHealth();
   renderMaterialPreview(row);
 }
 
-function renderVisualSearchNotes(plan) {
-  const panel = document.getElementById("materials-visual-notes");
+function renderMaterialSearchGroups() {
+  const panel = document.getElementById("materials-search-groups");
   if (!panel) return;
-  if (!plan || !Object.keys(plan).length) {
-    panel.innerHTML = `<p class="vd-muted">Generate keywords to create a visual search plan.</p>`;
+  const groups = materialSearchGroups();
+  if (!groups.length) {
+    panel.innerHTML = `<div class="vd-empty vd-search-plan-empty">Generate a shared search plan before searching video.</div>`;
     return;
   }
-  const douyinFallbacks = plan.fallbacks?.douyin || [];
-  const pinterestFallbacks = plan.fallbacks?.pinterest || [];
+  panel.innerHTML = groups.map((group) => {
+    const rows = state.rows.filter((row) => (group.scene_ids || []).includes(row.scene.scene_id));
+    const candidateCount = rows.reduce((maximum, row) => Math.max(maximum, row.candidates.length), 0);
+    return `
+      <button class="vd-search-group" data-search-group-id="${escapeHtml(group.group_id)}" data-active="${group.group_id === selectedMaterialSearchGroup()?.group_id}" type="button">
+        <span class="vd-pool-badge" data-role="${escapeHtml(group.role)}">${escapeHtml(titleCase(group.role))}</span>
+        <strong>${escapeHtml(group.label || group.pinterest_keyword || group.douyin_keyword)}</strong>
+        <em>${rows.length} scene${rows.length === 1 ? "" : "s"} / ${candidateCount} candidates</em>
+      </button>
+    `;
+  }).join("");
+  panel.querySelectorAll("[data-search-group-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const group = groups.find((item) => item.group_id === button.dataset.searchGroupId);
+      state.selectedSearchGroupId = group?.group_id || "";
+      if (group?.scene_ids?.length) state.selectedSceneId = group.scene_ids[0];
+      renderAll();
+    });
+  });
+}
+
+function renderSceneSearchGroupSelect(row, activeGroup) {
+  const select = document.getElementById("scene-search-group");
+  if (!select) return;
+  const groups = materialSearchGroups();
+  select.innerHTML = groups.length
+    ? groups.map((group) => `<option value="${escapeHtml(group.group_id)}">${escapeHtml(titleCase(group.role))}: ${escapeHtml(group.label || group.pinterest_keyword)}</option>`).join("")
+    : `<option value="">No search groups</option>`;
+  select.value = row?.scene?.search_group_id || activeGroup?.group_id || "";
+  select.disabled = !row || !groups.length;
+  const button = document.getElementById("assign-scene-search-group");
+  if (button) button.disabled = !row || groups.length < 2;
+}
+
+function renderVisualSearchNotes(plan, group = null) {
+  const panel = document.getElementById("materials-visual-notes");
+  if (!panel) return;
+  if (!group && (!plan || !Object.keys(plan).length)) {
+    panel.innerHTML = `<p class="vd-muted">Generate a shared search plan first.</p>`;
+    return;
+  }
+  const douyinFallbacks = group?.douyin_fallback ? [group.douyin_fallback] : (plan.fallbacks?.douyin || []);
+  const pinterestFallbacks = group?.pinterest_fallback ? [group.pinterest_fallback] : (plan.fallbacks?.pinterest || []);
   panel.innerHTML = `
-    ${plan.retention_role ? `<p><strong>Role</strong> ${escapeHtml(plan.retention_role)}</p>` : ""}
-    ${plan.content_anchor ? `<p><strong>Anchor</strong> ${escapeHtml(plan.content_anchor)}</p>` : ""}
-    ${plan.visible_action ? `<p><strong>Action</strong> ${escapeHtml(plan.visible_action)}</p>` : ""}
-    ${plan.visual_archetype ? `<p><strong>Visual</strong> ${escapeHtml(plan.visual_archetype)}</p>` : ""}
-    ${plan.material_notes ? `<p>${escapeHtml(plan.material_notes)}</p>` : ""}
+    ${group ? `<p><strong>${group.scene_ids.length} assigned scene${group.scene_ids.length === 1 ? "" : "s"}</strong></p>` : ""}
+    ${group?.exact_subject ? `<p><strong>Exact subject</strong> ${escapeHtml(group.exact_subject)}</p>` : ""}
+    ${!group && plan.retention_role ? `<p><strong>Role</strong> ${escapeHtml(plan.retention_role)}</p>` : ""}
+    ${!group && plan.content_anchor ? `<p><strong>Anchor</strong> ${escapeHtml(plan.content_anchor)}</p>` : ""}
+    ${!group && plan.material_notes ? `<p>${escapeHtml(plan.material_notes)}</p>` : ""}
     ${douyinFallbacks.length || pinterestFallbacks.length ? `
       <p class="vd-muted">Fallbacks:
         ${douyinFallbacks.length ? `Douyin ${douyinFallbacks.map(escapeHtml).join(", ")}` : ""}
@@ -4147,7 +4293,42 @@ function sceneVisualSearchPlan(scene) {
     : {};
 }
 
+function materialSearchPlan() {
+  const plan = state.project?.material_search_plan;
+  return plan && typeof plan === "object"
+    ? plan
+    : { popular_first: true, groups: [] };
+}
+
+function cloneMaterialSearchPlan() {
+  return JSON.parse(JSON.stringify(materialSearchPlan()));
+}
+
+function materialSearchGroups() {
+  return Array.isArray(materialSearchPlan().groups) ? materialSearchPlan().groups : [];
+}
+
+function searchGroupForScene(scene) {
+  if (!scene) return null;
+  return materialSearchGroups().find((group) => (group.scene_ids || []).includes(scene.scene_id)) || null;
+}
+
+function selectedMaterialSearchGroup(row = selectedRow()) {
+  const groups = materialSearchGroups();
+  return groups.find((group) => group.group_id === state.selectedSearchGroupId)
+    || searchGroupForScene(row?.scene)
+    || groups[0]
+    || null;
+}
+
 function materialKeywordsForScene(scene) {
+  const group = searchGroupForScene(scene);
+  if (group) {
+    return {
+      douyin: String(group.douyin_keyword || "").trim(),
+      pinterest: String(group.pinterest_keyword || "").trim(),
+    };
+  }
   const plan = sceneVisualSearchPlan(scene);
   const legacy = scene?.matching_keywords || [];
   return {

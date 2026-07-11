@@ -1055,6 +1055,179 @@ def test_videodesign_keyword_generation_plans_all_scenes_in_one_call(monkeypatch
     assert all(scene["visual_search_plan"]["query_strategy"] == "broad_grounded_v2" for scene in response.json()["scenes"])
 
 
+def test_videodesign_keyword_generation_creates_shared_v3_groups(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    scenes = client.post(f"/api/videodesign/projects/{project_id}/plan").json()["scenes"]
+
+    async def fake_visual_keywords(**kwargs):
+        scene_ids = [scene["scene_id"] for scene in kwargs["scenes"]]
+        return {
+            "project_anchor": "cats",
+            "groups": [
+                {
+                    "role": "hook",
+                    "label": "Cute cats",
+                    "douyin_keyword": "可爱猫咪",
+                    "pinterest_keyword": "cute cats",
+                    "scene_ids": scene_ids[:1],
+                },
+                {
+                    "role": "base",
+                    "label": "Cats",
+                    "douyin_keyword": "猫咪日常",
+                    "pinterest_keyword": "cats",
+                    "scene_ids": scene_ids[1:],
+                },
+            ],
+        }
+
+    monkeypatch.setattr(videodesign_service.script_client, "generate_visual_search_keywords", fake_visual_keywords)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/keywords/generate",
+        json={"scene_ids": None},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["errors"] == []
+    assert {group["role"] for group in body["search_plan"]["groups"]} == {"hook", "base"}
+    assert all(scene["search_group_id"] for scene in body["scenes"])
+    assert all(scene["visual_search_plan"]["query_strategy"] == "shared_pool_v3" for scene in body["scenes"])
+
+
+def test_videodesign_shared_group_searches_douyin_once_for_all_scenes(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    scenes = client.post(f"/api/videodesign/projects/{project_id}/plan").json()["scenes"]
+    scene_ids = [scene["scene_id"] for scene in scenes]
+    patch_response = client.patch(
+        f"/api/videodesign/projects/{project_id}/search-plan",
+        json={
+            "popular_first": True,
+            "groups": [
+                {
+                    "group_id": "grp_cats",
+                    "role": "base",
+                    "label": "Cats",
+                    "douyin_keyword": "猫咪日常",
+                    "pinterest_keyword": "cats",
+                    "scene_ids": scene_ids,
+                }
+            ],
+        },
+    )
+    assert patch_response.status_code == 200
+    calls = []
+
+    async def fake_search(request):
+        calls.append(request)
+        return SearchResponse(
+            keyword=request.keyword,
+            search_keyword=request.keyword,
+            strategy_used="browser",
+            diagnostics={
+                "popularity": {
+                    "requested": True,
+                    "applied": True,
+                    "method": "browser_filter",
+                    "publish_window_days": 180,
+                }
+            },
+            items=[
+                PublicDouyinResult(
+                    result_id="shared-result",
+                    douyin_aweme_id="shared-aweme",
+                    title="popular cat",
+                    cover_url="/cover",
+                    stream_url="/stream",
+                    download_url="/download",
+                    duration=5.0,
+                    stats={"digg_count": 1234},
+                )
+            ],
+        )
+
+    monkeypatch.setattr(douyin_service, "search", fake_search)
+
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/search",
+        json={
+            "group_ids": ["grp_cats"],
+            "douyin_min_per_scene": 1,
+            "pinterest_min_per_scene": 0,
+            "popular_first": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0].keyword == "猫咪日常"
+    assert calls[0].popular_first is True
+    rows = response.json()["rows"]
+    assert all(len(row["candidates"]) == 1 for row in rows)
+    assert all(row["candidates"][0]["search_group_id"] == "grp_cats" for row in rows)
+    assert all(row["candidates"][0]["stats"]["digg_count"] == 1234 for row in rows)
+    assert all(row["candidates"][0]["popularity"]["applied"] is True for row in rows)
+
+
+def test_videodesign_popular_first_can_be_disabled(monkeypatch):
+    client = TestClient(app)
+    project_id = _create_project(client)
+    scenes = client.post(f"/api/videodesign/projects/{project_id}/plan").json()["scenes"]
+    scene_ids = [scene["scene_id"] for scene in scenes]
+    client.patch(
+        f"/api/videodesign/projects/{project_id}/search-plan",
+        json={
+            "popular_first": True,
+            "groups": [
+                {
+                    "group_id": "grp_cats",
+                    "role": "base",
+                    "label": "Cats",
+                    "douyin_keyword": "猫咪",
+                    "pinterest_keyword": "cats",
+                    "scene_ids": scene_ids,
+                }
+            ],
+        },
+    )
+    seen = []
+
+    async def fake_search(request):
+        seen.append(request.popular_first)
+        return SearchResponse(
+            keyword=request.keyword,
+            search_keyword=request.keyword,
+            strategy_used="browser",
+            items=[
+                PublicDouyinResult(
+                    result_id="relevance-result",
+                    douyin_aweme_id="relevance-aweme",
+                    cover_url="/cover",
+                    stream_url="/stream",
+                    download_url="/download",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(douyin_service, "search", fake_search)
+    response = client.post(
+        f"/api/videodesign/projects/{project_id}/materials/search",
+        json={
+            "group_ids": ["grp_cats"],
+            "douyin_min_per_scene": 1,
+            "pinterest_min_per_scene": 0,
+            "popular_first": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen == [False]
+    assert response.json()["search_plan"]["popular_first"] is False
+
+
 def test_videodesign_keyword_generation_rejects_off_topic_story(monkeypatch):
     client = TestClient(app)
     create_response = client.post(

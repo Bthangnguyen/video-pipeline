@@ -18,7 +18,7 @@ Project Start
 -> Studio Transition, Caption Drag & Playhead
 -> Studio Audio, BGM & Event-Driven SFX
 -> Platform-Native Visual Search
--> Hook Visual vs Exact Visual Search
+-> Shared Search Pools & Popular-First Search
 ```
 
 Each flow should feel like a dedicated screen, not a section in one long form.
@@ -36,7 +36,7 @@ Each flow should feel like a dedicated screen, not a section in one long form.
 - [09 Studio Transition, Caption Drag, And Playhead Flow](09-studio-transition-caption-playhead-flow.md)
 - [10 Studio Audio, BGM, And Event-Driven SFX Flow](10-studio-audio-bgm-sfx-flow.md)
 - [11 Platform-Native Visual Search Flow](11-platform-native-visual-search-flow.md)
-- [12 Hook Visual And Exact Visual Search Flow](12-hook-vs-exact-visual-search-flow.md)
+- [12 Shared Search Pools And Popular-First Search Flow](12-shared-search-pools-popular-first-flow.md)
 
 ## Shared Shell
 

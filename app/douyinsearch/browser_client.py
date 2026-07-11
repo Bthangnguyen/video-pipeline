@@ -143,13 +143,13 @@ class BrowserClient:
             await self._release_context(context)
         return {"success": all(item["ok"] for item in checks), "source": "douyinsearch", "state": state, "checks": checks}
 
-    async def search(self, keyword: str, limit: int) -> tuple[list[DouyinResult], dict]:
+    async def search(self, keyword: str, limit: int, popular_first: bool = False) -> tuple[list[DouyinResult], dict]:
         if self.profile_dir:
             async with self._search_lock:
-                return await self._search(keyword, limit)
-        return await self._search(keyword, limit)
+                return await self._search(keyword, limit, popular_first)
+        return await self._search(keyword, limit, popular_first)
 
-    async def _search(self, keyword: str, limit: int) -> tuple[list[DouyinResult], dict]:
+    async def _search(self, keyword: str, limit: int, popular_first: bool = False) -> tuple[list[DouyinResult], dict]:
         if not self.cookie_file.exists():
             raise DouyinSearchError(MISSING_COOKIE_FILE, "Cookie file does not exist.")
 
@@ -188,10 +188,12 @@ class BrowserClient:
             if searched_with_input:
                 await page.wait_for_timeout(2500)
             if not searched_with_input or (not self._is_search_page(page.url) and not captured_payloads):
-                url = f"https://www.douyin.com/search/{quote(keyword)}?type=video"
+                url = self._search_url(keyword, popular_first)
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
+            popularity = await self._apply_popular_filter(page, popular_first)
             results, diagnostics = await self._wait_for_results(page, captured_payloads, limit)
+            diagnostics["popularity"] = popularity
             if results:
                 return results, diagnostics
             if diagnostics.get("search_shell_only"):
@@ -202,10 +204,12 @@ class BrowserClient:
                 )
 
             captured_payloads.clear()
-            retry_url = f"https://www.douyin.com/search/{quote(keyword)}?type=video"
+            retry_url = self._search_url(keyword, popular_first)
             await page.goto(retry_url, wait_until="domcontentloaded", timeout=45000)
+            popularity = await self._apply_popular_filter(page, popular_first)
             results, diagnostics = await self._wait_for_results(page, captured_payloads, limit)
             diagnostics["retry_used"] = True
+            diagnostics["popularity"] = popularity
             return results, diagnostics
         except DouyinSearchError:
             raise
@@ -445,7 +449,7 @@ class BrowserClient:
 
     async def _extract_dom_cards(self, page) -> list[dict]:
         return await page.evaluate(
-            """
+            r"""
             () => {
                 const anchors = Array.from(document.querySelectorAll('a[href*="/video/"], a[href*="/share/video/"], a[href*="modal_id="]'));
                 const seen = new Set();
@@ -454,13 +458,17 @@ class BrowserClient:
                     const img = root.querySelector('img') || a.querySelector('img');
                     const href = a.href || a.getAttribute('href') || '';
                     const title = root.innerText || a.innerText || a.getAttribute('title') || '';
+                    const likeText = Array.from(root.querySelectorAll('span, strong, em'))
+                        .map((el) => (el.innerText || el.textContent || '').trim())
+                        .find((text) => /^\d+(?:\.\d+)?(?:万|亿|w)?$/i.test(text)) || '';
                     const key = href || title;
                     if (!key || seen.has(key)) return null;
                     seen.add(key);
                     return {
                         href,
                         title,
-                        cover_url: img?.src || img?.getAttribute('src') || ''
+                        cover_url: img?.src || img?.getAttribute('src') || '',
+                        like_text: likeText
                     };
                 }).filter(Boolean);
             }
@@ -494,7 +502,7 @@ class BrowserClient:
         last_card_count = 0
         last_visible_card_count = 0
         for _ in range(attempts):
-            for payload in captured_payloads:
+            for payload in reversed(captured_payloads):
                 results = parse_search_payload(payload, limit)
                 if results:
                     return results, {"captured_api_response": True, "dom_fallback_used": False}
@@ -515,6 +523,59 @@ class BrowserClient:
             "visible_result_card_count": last_visible_card_count,
             "search_shell_only": self._is_search_page(page.url) and not captured_payloads and last_card_count == 0 and last_visible_card_count == 0,
         }
+
+    def _search_url(self, keyword: str, popular_first: bool) -> str:
+        query = "type=video"
+        if popular_first:
+            query += "&sort_type=1&publish_time=180"
+        return f"https://www.douyin.com/search/{quote(keyword)}?{query}"
+
+    async def _apply_popular_filter(self, page, popular_first: bool) -> dict:
+        if not popular_first:
+            return {
+                "requested": False,
+                "applied": False,
+                "method": "relevance",
+                "publish_window_days": 0,
+            }
+
+        detail = {
+            "requested": True,
+            "applied": False,
+            "method": "popular_unavailable",
+            "publish_window_days": 180,
+            "filter_opened": False,
+            "publish_filter_applied": False,
+        }
+        try:
+            detail["filter_opened"] = await self._click_visible_text(page, ("筛选",))
+            if detail["filter_opened"]:
+                await page.wait_for_timeout(350)
+            liked_applied = await self._click_visible_text(page, ("最多点赞",))
+            publish_applied = await self._click_visible_text(page, ("半年内", "半年"))
+            detail["publish_filter_applied"] = publish_applied
+            if liked_applied:
+                await self._click_visible_text(page, ("确定", "完成"))
+                await page.wait_for_timeout(1400)
+                detail["applied"] = True
+                detail["method"] = "browser_filter"
+        except Exception as exc:
+            detail["error"] = str(exc)
+        return detail
+
+    async def _click_visible_text(self, page, labels: tuple[str, ...]) -> bool:
+        for label in labels:
+            locator = page.get_by_text(label, exact=True)
+            count = await locator.count()
+            for index in range(count - 1, -1, -1):
+                candidate = locator.nth(index)
+                try:
+                    if await candidate.is_visible():
+                        await candidate.click(timeout=2500)
+                        return True
+                except Exception:
+                    continue
+        return False
 
     async def _wait_for_manual_session(self, page, state: str, timeout_seconds: int = 180) -> str:
         if state == "valid" or not self.profile_dir:

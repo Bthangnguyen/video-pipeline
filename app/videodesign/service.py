@@ -50,6 +50,8 @@ from app.videodesign.schemas import (
     MaterialsSearchRequest,
     MaterialAsset,
     MediaCandidate,
+    MaterialSearchGroup,
+    MaterialSearchPlan,
     SceneClip,
     SceneClipPatch,
     SceneAudioOffset,
@@ -420,6 +422,7 @@ class VideoDesignService:
         project.script_source = "deepseek"
         if data.get("scenes"):
             project.scenes = _scenes_from_deepseek(data["scenes"], project.split_settings)
+            _reset_material_search_plan(project)
         self.store.put(project)
         return {"success": True, "project": project.model_dump(), "script_result": data}
 
@@ -428,6 +431,7 @@ class VideoDesignService:
         if not project.script.strip():
             raise VideoDesignError(SCRIPT_REQUIRED, "Script is required before planning scenes.")
         project.scenes = split_script(project.script, project.split_settings)
+        _reset_material_search_plan(project)
         self.store.put(project)
         return {"success": True, "project_id": project.project_id, "scenes": [scene.model_dump() for scene in project.scenes]}
 
@@ -482,6 +486,7 @@ class VideoDesignService:
         replacement = split_script(f"{first}\n{second}", SplitSettings(split_mode="manual", max_words_per_scene=project.split_settings.max_words_per_scene))
         project.scenes[index : index + 1] = replacement
         refresh_scene_orders(project.scenes)
+        _reset_material_search_plan(project)
         self.store.put(project)
         return {"success": True, "scenes": [item.model_dump() for item in project.scenes]}
 
@@ -496,6 +501,7 @@ class VideoDesignService:
         project.scenes = [scene for scene in project.scenes if scene.scene_id not in scene_ids]
         project.scenes.insert(first_index, merged)
         refresh_scene_orders(project.scenes)
+        _reset_material_search_plan(project)
         self.store.put(project)
         return {"success": True, "scenes": [item.model_dump() for item in project.scenes]}
 
@@ -670,17 +676,21 @@ class VideoDesignService:
         project = self.store.get(project_id)
         scenes = _selected_scenes(project, request.scene_ids)
         total = len(scenes)
-        self._set_progress(project, "keyword_generation", "Planning broad search keywords for all selected scenes.", 0, total)
+        self._set_progress(project, "keyword_generation", "Planning shared search groups for all selected scenes.", 0, total)
         plans, errors = await self._generate_visual_plans_or_fallback(project, scenes)
         for index, scene in enumerate(scenes, start=1):
             plan = plans[scene.scene_id]
             self._set_progress(
                 project,
                 "keyword_generation",
-                f"Prepared scene {index}/{total}: Douyin {plan.get('douyin_primary_keyword', '')} / Pinterest {plan.get('pinterest_primary_keyword', '')}",
+                f"Assigned scene {index}/{total} to {plan.get('search_role', 'base')}: Douyin {plan.get('douyin_primary_keyword', '')} / Pinterest {plan.get('pinterest_primary_keyword', '')}",
                 index,
                 total,
-                {"scene_id": scene.scene_id, "fallback": str(plan.get("query_strategy", "")).startswith("fallback")},
+                {
+                    "scene_id": scene.scene_id,
+                    "search_group_id": scene.search_group_id,
+                    "fallback": str(plan.get("query_strategy", "")).startswith("fallback"),
+                },
             )
         self.store.put(project)
         self._set_progress(project, "idle", "Keyword generation finished.", total, total)
@@ -688,28 +698,60 @@ class VideoDesignService:
             "success": True,
             "project_id": project.project_id,
             "scenes": [scene.model_dump() for scene in scenes],
+            "search_plan": project.material_search_plan.model_dump(),
             "errors": errors,
+        }
+
+    def set_material_search_plan(self, project_id: str, request: MaterialSearchPlan) -> dict:
+        project = self.store.get(project_id)
+        project.material_search_plan = _normalize_user_material_search_plan(project, request)
+        _sync_scenes_from_material_search_plan(project)
+        self.store.put(project)
+        return {
+            "success": True,
+            "project_id": project.project_id,
+            "search_plan": project.material_search_plan.model_dump(),
+            "scenes": [scene.model_dump() for scene in project.scenes],
         }
 
     async def search_materials(self, project_id: str, request: MaterialsSearchRequest) -> dict:
         project = self.store.get(project_id)
-        scenes = _selected_scenes(project, request.scene_ids)
-        total = len(scenes)
+        requested_scenes = _selected_scenes(project, request.scene_ids)
+        total = len(requested_scenes)
         douyin_limit = request.douyin_min_per_scene if request.douyin_min_per_scene is not None else request.candidates_per_scene
         pinterest_limit = request.pinterest_min_per_scene
-        scene_ids = {scene.scene_id for scene in scenes}
-        project.search_tasks = [task for task in project.search_tasks if task.scene_id not in scene_ids]
-        for scene in scenes:
-            scene.search_tasks = []
-        self._set_progress(project, "materials_search", "Preparing material search jobs.", 0, total)
+        self._set_progress(project, "materials_search", "Preparing shared material search groups.", 0, total)
 
         if request.use_smart_keywords:
-            self._set_progress(project, "materials_search", "Regenerating one visual search plan for all selected scenes.", 0, total)
-            await self._generate_visual_plans_or_fallback(project, scenes)
+            self._set_progress(project, "materials_search", "Regenerating one shared search plan for all selected scenes.", 0, total)
+            await self._generate_visual_plans_or_fallback(project, requested_scenes)
+
+        _ensure_material_search_plan(project, requested_scenes)
+        if request.popular_first is not None:
+            project.material_search_plan.popular_first = request.popular_first
+        popular_first = project.material_search_plan.popular_first
+        groups = _search_groups_for_request(project, request)
+        selected_group_ids = {group.group_id for group in groups}
+        scenes = [
+            scene
+            for scene in project.scenes
+            if any(scene.scene_id in group.scene_ids for group in groups)
+        ]
+        scene_ids = {scene.scene_id for scene in scenes}
+        project.search_tasks = [
+            task
+            for task in project.search_tasks
+            if task.search_group_id not in selected_group_ids
+            and not (not task.search_group_id and task.scene_id in scene_ids)
+        ]
+        for scene in scenes:
+            scene.search_tasks = []
 
         plans = []
-        for index, scene in enumerate(scenes, start=1):
-            scene.approval_state = "searching"
+        for index, group in enumerate(groups, start=1):
+            group_scenes = [scene for scene in project.scenes if scene.scene_id in group.scene_ids]
+            for scene in group_scenes:
+                scene.approval_state = "searching"
             source_plan = [
                 ("douyinsearch", douyin_limit),
                 ("pinterestsearch", pinterest_limit),
@@ -717,13 +759,14 @@ class VideoDesignService:
             for source, source_limit in source_plan:
                 if source_limit <= 0:
                     continue
-                if len(_candidates_for_scene(project, scene.scene_id, source)) >= source_limit:
+                if all(len(_candidates_for_scene(project, scene.scene_id, source)) >= source_limit for scene in group_scenes):
                     continue
-                keywords = await self._keywords_for_scene_source(project, scene, request, source)
+                keywords = _keywords_for_search_group(group, source, request.queries_per_scene)
                 plans.append(
                     {
                         "index": index,
-                        "scene": scene,
+                        "group": group,
+                        "scenes": group_scenes,
                         "source": source,
                         "source_limit": source_limit,
                         "keywords": keywords[: request.queries_per_scene],
@@ -735,7 +778,7 @@ class VideoDesignService:
             for scene in scenes:
                 scene.approval_state = "needs_review" if _candidates_for_scene(project, scene.scene_id) else "planned"
             self.store.put(project)
-            self._set_progress(project, "idle", "Material search finished.", total, total)
+            self._set_progress(project, "idle", "Shared material search finished.", len(groups), len(groups))
             return self.review(project_id)
 
         completed = 0
@@ -748,18 +791,23 @@ class VideoDesignService:
 
         async def run_plan(plan: dict) -> None:
             nonlocal completed
-            scene = plan["scene"]
+            group = plan["group"]
+            group_scenes = plan["scenes"]
             source = plan["source"]
             async with semaphores[source]:
                 for keyword in plan["keywords"]:
-                    existing_count = len(_candidates_for_scene(project, scene.scene_id, source))
-                    if existing_count >= plan["source_limit"]:
+                    missing_counts = [
+                        max(0, plan["source_limit"] - len(_candidates_for_scene(project, scene.scene_id, source)))
+                        for scene in group_scenes
+                    ]
+                    needed = max(missing_counts, default=0)
+                    if needed <= 0:
                         break
-                    needed = plan["source_limit"] - existing_count
                     task = DouyinSearchTask(
                         search_task_id=f"dst_{uuid.uuid4().hex}",
                         project_id=project.project_id,
-                        scene_id=scene.scene_id,
+                        scene_id=group_scenes[0].scene_id,
+                        search_group_id=group.group_id,
                         source=source,
                         keyword=keyword,
                         translate_to_chinese=_should_translate_douyin_keyword(keyword, request.translate_to_chinese) if source == "douyinsearch" else False,
@@ -768,14 +816,21 @@ class VideoDesignService:
                     )
                     async with lock:
                         project.search_tasks.append(task)
-                        scene.search_tasks.append(task.search_task_id)
+                        for scene in group_scenes:
+                            scene.search_tasks.append(task.search_task_id)
                         self._set_progress(
                             project,
                             "materials_search",
-                            f"Searching {source_label(source)} scene {plan['index']}/{total}: {keyword}",
+                            f"Searching {source_label(source)} group {plan['index']}/{len(groups)} ({group.label}): {keyword}",
                             completed,
                             progress_total,
-                            {"scene_id": scene.scene_id, "keyword": keyword, "source": source},
+                            {
+                                "search_group_id": group.group_id,
+                                "scene_ids": group.scene_ids,
+                                "keyword": keyword,
+                                "source": source,
+                                "popular_first": popular_first,
+                            },
                         )
                         self.store.put(project)
                     try:
@@ -788,6 +843,7 @@ class VideoDesignService:
                                         translate_to_chinese=translate_keyword,
                                         limit=max(needed, 3),
                                         strategy="auto",
+                                        popular_first=popular_first,
                                     )
                                 ),
                                 timeout=45,
@@ -805,11 +861,22 @@ class VideoDesignService:
                                 timeout=90,
                             )
                         async with lock:
-                            candidate_ids = _add_candidates(project, scene, response.items, needed, source, keyword)
+                            candidate_ids = _add_group_candidates(
+                                project,
+                                group,
+                                group_scenes,
+                                response.items,
+                                plan["source_limit"],
+                                source,
+                                keyword,
+                                response.diagnostics,
+                                popular_first,
+                            )
                             task.status = "completed"
                             task.candidate_ids.extend(candidate_ids)
                             if candidate_ids:
-                                scene.approval_state = "needs_review"
+                                for scene in group_scenes:
+                                    scene.approval_state = "needs_review"
                             self.store.put(project)
                     except asyncio.TimeoutError:
                         async with lock:
@@ -835,10 +902,14 @@ class VideoDesignService:
                 self._set_progress(
                     project,
                     "materials_search",
-                    f"Finished {source_label(source)} scene {plan['index']}/{total}: {len(_candidates_for_scene(project, scene.scene_id, source))} candidates.",
+                    f"Finished {source_label(source)} group {plan['index']}/{len(groups)} ({group.label}).",
                     completed,
                     progress_total,
-                    {"scene_id": scene.scene_id, "source": source},
+                    {
+                        "search_group_id": group.group_id,
+                        "scene_ids": group.scene_ids,
+                        "source": source,
+                    },
                 )
                 self.store.put(project)
 
@@ -846,7 +917,7 @@ class VideoDesignService:
         for scene in scenes:
             scene.approval_state = "needs_review" if _candidates_for_scene(project, scene.scene_id) else "planned"
         self.store.put(project)
-        self._set_progress(project, "idle", "Material search finished.", progress_total, progress_total)
+        self._set_progress(project, "idle", "Shared material search finished.", progress_total, progress_total)
         return self.review(project_id)
 
     async def materials_preflight(self, request: MaterialsPreflightRequest) -> dict:
@@ -887,7 +958,12 @@ class VideoDesignService:
                     "search_errors": _search_errors_for_scene(project, scene.scene_id),
                 }
             )
-        return {"success": True, "project_id": project.project_id, "rows": rows}
+        return {
+            "success": True,
+            "project_id": project.project_id,
+            "search_plan": project.material_search_plan.model_dump(),
+            "rows": rows,
+        }
 
     def progress(self, project_id: str) -> dict:
         project = self.store.get(project_id)
@@ -1097,24 +1173,6 @@ class VideoDesignService:
                 ) from exc
             raise
 
-    async def _keywords_for_scene_source(
-        self,
-        project: VideoDesignProject,
-        scene: ScenePlan,
-        request: MaterialsSearchRequest,
-        source: str,
-    ) -> list[str]:
-        keywords = _source_keywords_from_visual_plan(scene.visual_search_plan, source, request.queries_per_scene)
-        if keywords:
-            return keywords
-        keywords = _normalize_keywords(scene.matching_keywords, request.queries_per_scene)
-        if keywords:
-            return keywords
-        keywords = _fallback_keywords_for_scene(project, scene, request.queries_per_scene)
-        scene.matching_keywords = keywords
-        self.store.put(project)
-        return keywords
-
     async def _generate_visual_plans_or_fallback(
         self,
         project: VideoDesignProject,
@@ -1139,47 +1197,57 @@ class VideoDesignService:
                 language=project.language,
                 target_style=str(project.design_preset.get("scene_media", {}).get("style", "mixed")),
             )
-            for scene in scenes:
-                plan = _normalize_visual_search_plan(data, project, scene)
-                if not plan:
-                    plan = _fallback_visual_search_plan(project, scene)
-                    errors.append(
-                        {
-                            "scene_id": scene.scene_id,
-                            "error": {
-                                "code": SCRIPT_GENERATION_FAILED,
-                                "message": "DeepSeek did not return a usable visual search plan for this scene.",
-                                "retryable": True,
-                            },
-                        }
-                    )
-                elif plan.get("query_strategy") == "fallback_ungrounded":
-                    errors.append(
-                        {
-                            "scene_id": scene.scene_id,
-                            "error": {
-                                "code": SCRIPT_GENERATION_FAILED,
-                                "message": "DeepSeek returned an ungrounded visual query, so a broad local fallback was used.",
-                                "retryable": True,
-                            },
-                        }
-                    )
-                scene.visual_search_plan = plan
-                scene.matching_keywords = _legacy_keywords_from_visual_plan(plan, 1)
-                plans[scene.scene_id] = plan
+            if isinstance(data.get("groups"), list):
+                generated_plan, plan_errors = _normalize_generated_material_search_plan(project, scenes, data)
+                errors.extend(plan_errors)
+                project.material_search_plan = _merge_generated_material_search_plan(project, scenes, generated_plan)
+                _sync_scenes_from_material_search_plan(project)
+                plans = {scene.scene_id: scene.visual_search_plan for scene in scenes}
+            else:
+                for scene in scenes:
+                    plan = _normalize_visual_search_plan(data, project, scene)
+                    if not plan:
+                        plan = _fallback_visual_search_plan(project, scene)
+                        errors.append(
+                            {
+                                "scene_id": scene.scene_id,
+                                "error": {
+                                    "code": SCRIPT_GENERATION_FAILED,
+                                    "message": "DeepSeek did not return a usable visual search plan for this scene.",
+                                    "retryable": True,
+                                },
+                            }
+                        )
+                    elif plan.get("query_strategy") == "fallback_ungrounded":
+                        errors.append(
+                            {
+                                "scene_id": scene.scene_id,
+                                "error": {
+                                    "code": SCRIPT_GENERATION_FAILED,
+                                    "message": "DeepSeek returned an ungrounded visual query, so a broad local fallback was used.",
+                                    "retryable": True,
+                                },
+                            }
+                        )
+                    scene.visual_search_plan = plan
+                    scene.matching_keywords = _legacy_keywords_from_visual_plan(plan, 1)
+                    plans[scene.scene_id] = plan
+                generated_plan = _material_search_plan_from_scene_plans(project, scenes)
+                project.material_search_plan = _merge_generated_material_search_plan(project, scenes, generated_plan)
+                _sync_scene_group_ids(project, preserve_visual_plans=True)
         except VideoDesignError as error:
+            fallback_plan = _fallback_material_search_plan(project, scenes)
+            project.material_search_plan = _merge_generated_material_search_plan(project, scenes, fallback_plan)
+            _sync_scenes_from_material_search_plan(project, query_strategy="fallback_local")
             for scene in scenes:
-                fallback = _fallback_visual_search_plan(project, scene)
-                scene.visual_search_plan = fallback
-                scene.matching_keywords = _legacy_keywords_from_visual_plan(fallback, 1)
-                plans[scene.scene_id] = fallback
+                plans[scene.scene_id] = scene.visual_search_plan
                 errors.append({"scene_id": scene.scene_id, "error": error.to_payload()})
         except Exception as exc:
+            fallback_plan = _fallback_material_search_plan(project, scenes)
+            project.material_search_plan = _merge_generated_material_search_plan(project, scenes, fallback_plan)
+            _sync_scenes_from_material_search_plan(project, query_strategy="fallback_local")
             for scene in scenes:
-                fallback = _fallback_visual_search_plan(project, scene)
-                scene.visual_search_plan = fallback
-                scene.matching_keywords = _legacy_keywords_from_visual_plan(fallback, 1)
-                plans[scene.scene_id] = fallback
+                plans[scene.scene_id] = scene.visual_search_plan
                 errors.append(
                     {
                         "scene_id": scene.scene_id,
@@ -1617,6 +1685,12 @@ def _selected_scenes(project: VideoDesignProject, scene_ids: list[str] | None) -
     return selected
 
 
+def _reset_material_search_plan(project: VideoDesignProject) -> None:
+    project.material_search_plan = MaterialSearchPlan(
+        popular_first=project.material_search_plan.popular_first,
+    )
+
+
 def _renderable_scenes(project: VideoDesignProject) -> list[ScenePlan]:
     return [scene for scene in project.scenes if scene.approval_state != "placeholder_allowed"]
 
@@ -1695,6 +1769,368 @@ def _fallback_keywords_for_scene(project: VideoDesignProject, scene: ScenePlan, 
         if len(candidates) >= max(1, limit):
             break
     return candidates[: max(1, limit)] or ["raw vertical footage"]
+
+
+def _normalize_generated_material_search_plan(
+    project: VideoDesignProject,
+    scenes: list[ScenePlan],
+    data: dict,
+) -> tuple[MaterialSearchPlan, list[dict]]:
+    selected_ids = {scene.scene_id for scene in scenes}
+    errors: list[dict] = []
+    groups: list[MaterialSearchGroup] = []
+    assigned: set[str] = set()
+    raw_groups = [item for item in data.get("groups", []) if isinstance(item, dict)]
+    role_priority = {"exact": 0, "hook": 1, "base": 2}
+    raw_groups.sort(key=lambda item: role_priority.get(str(item.get("role") or "base").lower(), 2))
+
+    used_ids: set[str] = set()
+    for item in raw_groups:
+        role = str(item.get("role") or "base").lower()
+        if role not in {"hook", "base", "exact"}:
+            role = "base"
+        scene_ids = []
+        for scene_id in item.get("scene_ids") or []:
+            value = str(scene_id or "")
+            if value not in selected_ids or value in assigned:
+                continue
+            scene_ids.append(value)
+        if not scene_ids:
+            continue
+
+        exact_subject = _first_text(item.get("exact_subject")) if role == "exact" else ""
+        label = _first_text(item.get("label"), exact_subject, role.title())
+        douyin_keyword = _normalize_douyin_visual_query(item.get("douyin_keyword", ""))
+        pinterest_keyword = _normalize_pinterest_visual_query(item.get("pinterest_keyword", ""))
+        if not douyin_keyword:
+            douyin_keyword = _first_text(pinterest_keyword, _project_base_keyword(project, scenes))
+        if not pinterest_keyword:
+            pinterest_keyword = _normalize_pinterest_visual_query(_first_text(exact_subject, label, _project_base_keyword(project, scenes)))
+        if not douyin_keyword or not pinterest_keyword:
+            errors.extend(
+                {
+                    "scene_id": scene_id,
+                    "error": {
+                        "code": SCRIPT_GENERATION_FAILED,
+                        "message": "DeepSeek returned a search group without usable source keywords.",
+                        "retryable": True,
+                    },
+                }
+                for scene_id in scene_ids
+            )
+            continue
+        if not _generated_search_group_is_grounded(project, scenes, label, exact_subject, pinterest_keyword):
+            errors.extend(
+                {
+                    "scene_id": scene_id,
+                    "error": {
+                        "code": SCRIPT_GENERATION_FAILED,
+                        "message": "DeepSeek returned an ungrounded search group, so the scene was assigned to base footage.",
+                        "retryable": True,
+                    },
+                }
+                for scene_id in scene_ids
+            )
+            continue
+
+        group_id = _unique_search_group_id(role, exact_subject or label, used_ids)
+        groups.append(
+            MaterialSearchGroup(
+                group_id=group_id,
+                role=role,
+                label=label,
+                exact_subject=exact_subject,
+                douyin_keyword=douyin_keyword,
+                pinterest_keyword=pinterest_keyword,
+                douyin_fallback=_normalize_douyin_visual_query(item.get("douyin_fallback", "")),
+                pinterest_fallback=_normalize_pinterest_visual_query(item.get("pinterest_fallback", "")),
+                scene_ids=scene_ids,
+            )
+        )
+        assigned.update(scene_ids)
+
+    missing_ids = [scene.scene_id for scene in scenes if scene.scene_id not in assigned]
+    if missing_ids:
+        base = next((group for group in groups if group.role == "base"), None)
+        if not base:
+            base = _fallback_material_search_group(project, scenes, missing_ids)
+            groups.append(base)
+        else:
+            base.scene_ids.extend(missing_ids)
+        errors.extend(
+            {
+                "scene_id": scene_id,
+                "error": {
+                    "code": SCRIPT_GENERATION_FAILED,
+                    "message": "DeepSeek omitted this scene, so it was assigned to the shared base group.",
+                    "retryable": True,
+                },
+            }
+            for scene_id in missing_ids
+        )
+
+    plan = MaterialSearchPlan(popular_first=project.material_search_plan.popular_first, groups=groups)
+    return _normalize_user_material_search_plan_for_scenes(project, plan, selected_ids), errors
+
+
+def _generated_search_group_is_grounded(
+    project: VideoDesignProject,
+    scenes: list[ScenePlan],
+    label: str,
+    exact_subject: str,
+    pinterest_keyword: str,
+) -> bool:
+    context = " ".join(
+        [
+            project.idea,
+            project.script,
+            *(scene.voiceover_text for scene in scenes),
+            *(scene.visual_brief for scene in scenes),
+        ]
+    )
+    context_tokens = _visual_grounding_tokens(context)
+    group_tokens = _visual_grounding_tokens(" ".join([label, exact_subject, pinterest_keyword]))
+    return bool(context_tokens and group_tokens and context_tokens.intersection(group_tokens))
+
+
+def _material_search_plan_from_scene_plans(
+    project: VideoDesignProject,
+    scenes: list[ScenePlan],
+) -> MaterialSearchPlan:
+    groups: list[MaterialSearchGroup] = []
+    grouped: dict[tuple[str, str, str], MaterialSearchGroup] = {}
+    used_ids: set[str] = set()
+    for scene in scenes:
+        plan = scene.visual_search_plan or _fallback_visual_search_plan_from_keywords(
+            scene,
+            scene.matching_keywords or _fallback_keywords_for_scene(project, scene, 3),
+        )
+        role = "hook" if scene.order == 1 and plan.get("retention_role") == "hook" else "base"
+        douyin_keyword = _first_text(plan.get("douyin_primary_keyword"), *scene.matching_keywords)
+        pinterest_keyword = _first_text(plan.get("pinterest_primary_keyword"), *scene.matching_keywords)
+        key = (role, douyin_keyword.lower(), pinterest_keyword.lower())
+        group = grouped.get(key)
+        if not group:
+            group = MaterialSearchGroup(
+                group_id=_unique_search_group_id(role, plan.get("content_anchor") or role, used_ids),
+                role=role,
+                label=_first_text(plan.get("content_anchor"), plan.get("visual_archetype"), role.title()),
+                douyin_keyword=douyin_keyword,
+                pinterest_keyword=pinterest_keyword,
+                douyin_fallback=_first_text(*_fallbacks_for_source(plan, "douyin")),
+                pinterest_fallback=_first_text(*_fallbacks_for_source(plan, "pinterest")),
+                scene_ids=[],
+            )
+            grouped[key] = group
+            groups.append(group)
+        group.scene_ids.append(scene.scene_id)
+    return MaterialSearchPlan(popular_first=project.material_search_plan.popular_first, groups=groups)
+
+
+def _fallback_material_search_plan(project: VideoDesignProject, scenes: list[ScenePlan]) -> MaterialSearchPlan:
+    scene_ids = [scene.scene_id for scene in scenes]
+    return MaterialSearchPlan(
+        popular_first=project.material_search_plan.popular_first,
+        groups=[_fallback_material_search_group(project, scenes, scene_ids)],
+    )
+
+
+def _fallback_material_search_group(
+    project: VideoDesignProject,
+    scenes: list[ScenePlan],
+    scene_ids: list[str],
+) -> MaterialSearchGroup:
+    keyword = _project_base_keyword(project, scenes)
+    return MaterialSearchGroup(
+        group_id="grp_base",
+        role="base",
+        label=keyword or "Base",
+        douyin_keyword=keyword,
+        pinterest_keyword=keyword,
+        scene_ids=list(scene_ids),
+    )
+
+
+def _project_base_keyword(project: VideoDesignProject, scenes: list[ScenePlan] | None = None) -> str:
+    scene_list = scenes or project.scenes
+    candidates = [project.idea]
+    if scene_list:
+        candidates.extend(
+            [
+                scene_list[0].matching_keywords[0] if scene_list[0].matching_keywords else "",
+                scene_list[0].visual_brief,
+                scene_list[0].voiceover_text,
+            ]
+        )
+    candidates.append(project.script)
+    for candidate in candidates:
+        phrase = _keyword_phrase(candidate)
+        words = phrase.split()
+        if words:
+            return " ".join(words[:2])
+    return "daily life"
+
+
+def _unique_search_group_id(role: str, label: str, used_ids: set[str]) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", str(label or "").lower()).strip("_")[:36]
+    base = f"grp_{slug or role}"
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used_ids.add(candidate)
+    return candidate
+
+
+def _merge_generated_material_search_plan(
+    project: VideoDesignProject,
+    scenes: list[ScenePlan],
+    generated: MaterialSearchPlan,
+) -> MaterialSearchPlan:
+    selected_ids = {scene.scene_id for scene in scenes}
+    all_scene_ids = {scene.scene_id for scene in project.scenes}
+    if selected_ids == all_scene_ids or not project.material_search_plan.groups:
+        return _normalize_user_material_search_plan(project, generated)
+
+    preserved = []
+    for group in project.material_search_plan.groups:
+        remaining = [scene_id for scene_id in group.scene_ids if scene_id not in selected_ids]
+        if remaining:
+            preserved.append(group.model_copy(update={"scene_ids": remaining}))
+    combined = MaterialSearchPlan(
+        popular_first=project.material_search_plan.popular_first,
+        groups=[*generated.groups, *preserved],
+    )
+    return _normalize_user_material_search_plan(project, combined)
+
+
+def _normalize_user_material_search_plan(project: VideoDesignProject, plan: MaterialSearchPlan) -> MaterialSearchPlan:
+    return _normalize_user_material_search_plan_for_scenes(
+        project,
+        plan,
+        {scene.scene_id for scene in project.scenes},
+    )
+
+
+def _normalize_user_material_search_plan_for_scenes(
+    project: VideoDesignProject,
+    plan: MaterialSearchPlan,
+    valid_scene_ids: set[str],
+) -> MaterialSearchPlan:
+    used_ids: set[str] = set()
+    assigned: set[str] = set()
+    normalized: list[MaterialSearchGroup] = []
+    coalesced: dict[tuple[str, str], MaterialSearchGroup] = {}
+
+    for item in plan.groups:
+        role = item.role if item.role in {"hook", "base", "exact"} else "base"
+        exact_subject = _first_text(item.exact_subject) if role == "exact" else ""
+        key_subject = exact_subject.lower() if role == "exact" else role
+        key = (role, key_subject)
+        scene_ids = []
+        for scene_id in item.scene_ids:
+            if scene_id not in valid_scene_ids or scene_id in assigned:
+                continue
+            scene_ids.append(scene_id)
+            assigned.add(scene_id)
+        if not scene_ids:
+            continue
+
+        existing = coalesced.get(key)
+        if existing:
+            existing.scene_ids.extend(scene_ids)
+            continue
+
+        requested_id = re.sub(r"[^A-Za-z0-9_-]+", "_", item.group_id or "").strip("_")
+        group_id = requested_id if requested_id and requested_id not in used_ids else _unique_search_group_id(role, exact_subject or item.label, used_ids)
+        used_ids.add(group_id)
+        base_keyword = _project_base_keyword(project)
+        douyin_keyword = _first_text(*_normalize_keywords([item.douyin_keyword], 1), base_keyword)
+        pinterest_keyword = _first_text(*_normalize_keywords([item.pinterest_keyword], 1), base_keyword)
+        group = MaterialSearchGroup(
+            group_id=group_id,
+            role=role,
+            label=_first_text(item.label, exact_subject, pinterest_keyword, role.title()),
+            exact_subject=exact_subject,
+            douyin_keyword=douyin_keyword,
+            pinterest_keyword=pinterest_keyword,
+            douyin_fallback=_first_text(*_normalize_keywords([item.douyin_fallback], 1)),
+            pinterest_fallback=_first_text(*_normalize_keywords([item.pinterest_fallback], 1)),
+            scene_ids=scene_ids,
+        )
+        normalized.append(group)
+        coalesced[key] = group
+
+    missing = [scene.scene_id for scene in project.scenes if scene.scene_id in valid_scene_ids and scene.scene_id not in assigned]
+    if missing:
+        base = next((group for group in normalized if group.role == "base"), None)
+        if not base:
+            base = _fallback_material_search_group(project, project.scenes, [])
+            if base.group_id in used_ids:
+                base.group_id = _unique_search_group_id("base", "base", used_ids)
+            normalized.append(base)
+        base.scene_ids.extend(missing)
+
+    if normalized and not any(group.role == "base" for group in normalized):
+        source_group = next((group for group in reversed(normalized) if group.scene_ids), None)
+        if source_group:
+            base_scene_id = source_group.scene_ids.pop()
+            normalized = [group for group in normalized if group.scene_ids]
+            base = _fallback_material_search_group(project, project.scenes, [base_scene_id])
+            if base.group_id in used_ids:
+                base.group_id = _unique_search_group_id("base", "base", used_ids)
+            normalized.append(base)
+
+    return MaterialSearchPlan(popular_first=bool(plan.popular_first), groups=normalized)
+
+
+def _sync_scenes_from_material_search_plan(
+    project: VideoDesignProject,
+    query_strategy: str = "shared_pool_v3",
+) -> None:
+    groups = {scene_id: group for group in project.material_search_plan.groups for scene_id in group.scene_ids}
+    for scene in project.scenes:
+        group = groups.get(scene.scene_id)
+        if not group:
+            continue
+        scene.search_group_id = group.group_id
+        scene.visual_search_plan = {
+            "search_group_id": group.group_id,
+            "search_role": group.role,
+            "exact_subject": group.exact_subject,
+            "retention_role": "hook" if group.role == "hook" else "evidence",
+            "content_anchor": group.exact_subject or group.label,
+            "visible_action": "",
+            "visual_intent": group.label,
+            "visual_archetype": group.label,
+            "douyin_primary_keyword": group.douyin_keyword,
+            "pinterest_primary_keyword": group.pinterest_keyword,
+            "fallbacks": {
+                "douyin": [group.douyin_fallback] if group.douyin_fallback else [],
+                "pinterest": [group.pinterest_fallback] if group.pinterest_fallback else [],
+            },
+            "avoid": [],
+            "material_notes": f"Shared {group.role} search group: {group.label}.",
+            "query_strategy": query_strategy,
+        }
+        scene.matching_keywords = _normalize_keywords([group.pinterest_keyword, group.douyin_keyword], 1)
+
+
+def _sync_scene_group_ids(project: VideoDesignProject, preserve_visual_plans: bool = False) -> None:
+    groups = {scene_id: group for group in project.material_search_plan.groups for scene_id in group.scene_ids}
+    for scene in project.scenes:
+        group = groups.get(scene.scene_id)
+        if not group:
+            continue
+        scene.search_group_id = group.group_id
+        if preserve_visual_plans:
+            scene.visual_search_plan = {
+                **scene.visual_search_plan,
+                "search_group_id": group.group_id,
+                "search_role": group.role,
+                "exact_subject": group.exact_subject,
+            }
 
 
 def _normalize_visual_search_plan(data: dict, project: VideoDesignProject, scene: ScenePlan) -> dict:
@@ -1861,12 +2297,43 @@ def _visual_grounding_tokens(text: str) -> set[str]:
     return tokens
 
 
-def _source_keywords_from_visual_plan(plan: dict | None, source: str, limit: int) -> list[str]:
-    if not plan:
-        return []
-    source_key = "douyin" if source == "douyinsearch" else "pinterest"
-    primary_key = f"{source_key}_primary_keyword"
-    values = [plan.get(primary_key), *(_fallbacks_for_source(plan, source_key))]
+def _ensure_material_search_plan(project: VideoDesignProject, scenes: list[ScenePlan]) -> None:
+    if project.material_search_plan.groups:
+        _sync_scene_group_ids(project, preserve_visual_plans=True)
+        return
+    source_scenes = project.scenes or scenes
+    project.material_search_plan = _normalize_user_material_search_plan(
+        project,
+        _material_search_plan_from_scene_plans(project, source_scenes),
+    )
+    _sync_scene_group_ids(project, preserve_visual_plans=True)
+
+
+def _search_groups_for_request(
+    project: VideoDesignProject,
+    request: MaterialsSearchRequest,
+) -> list[MaterialSearchGroup]:
+    groups = project.material_search_plan.groups
+    if request.group_ids:
+        requested = set(request.group_ids)
+        selected = [group for group in groups if group.group_id in requested]
+        if len(selected) != len(requested):
+            raise VideoDesignError(INVALID_PROJECT_INPUT, "One or more material search groups do not exist.")
+        return selected
+    if request.scene_ids:
+        requested_scenes = set(request.scene_ids)
+        selected = [group for group in groups if requested_scenes.intersection(group.scene_ids)]
+        if not selected:
+            raise VideoDesignError(INVALID_PROJECT_INPUT, "Selected scenes do not have a material search group.")
+        return selected
+    return groups
+
+
+def _keywords_for_search_group(group: MaterialSearchGroup, source: str, limit: int) -> list[str]:
+    if source == "douyinsearch":
+        values = [group.douyin_keyword, group.douyin_fallback]
+    else:
+        values = [group.pinterest_keyword, group.pinterest_fallback]
     return _normalize_keywords(values, limit)
 
 
@@ -2026,17 +2493,83 @@ def _candidates_for_scene(project: VideoDesignProject, scene_id: str, source: st
     ]
 
 
-def _add_candidates(project: VideoDesignProject, scene: ScenePlan, results, limit: int, source: str, keyword: str) -> list[str]:
+def _add_group_candidates(
+    project: VideoDesignProject,
+    group: MaterialSearchGroup,
+    scenes: list[ScenePlan],
+    results,
+    limit_per_scene: int,
+    source: str,
+    keyword: str,
+    diagnostics: dict,
+    popular_first: bool,
+) -> list[str]:
+    candidate_ids: list[str] = []
+    popularity = _candidate_popularity(source, popular_first, diagnostics)
+    for scene in scenes:
+        needed = max(0, limit_per_scene - len(_candidates_for_scene(project, scene.scene_id, source)))
+        if needed <= 0:
+            continue
+        candidate_ids.extend(
+            _add_candidates(
+                project,
+                scene,
+                results,
+                needed,
+                source,
+                keyword,
+                search_group_id=group.group_id,
+                popularity=popularity,
+            )
+        )
+    return candidate_ids
+
+
+def _candidate_popularity(source: str, requested: bool, diagnostics: dict | None) -> dict:
+    if source == "pinterestsearch":
+        return {
+            "requested": bool(requested),
+            "applied": False,
+            "method": "platform_order",
+            "publish_window_days": 0,
+        }
+    detail = (diagnostics or {}).get("popularity") or {}
+    return {
+        "requested": bool(requested),
+        "applied": bool(detail.get("applied", False)) if requested else False,
+        "method": _first_text(detail.get("method"), "relevance" if not requested else "popular_unavailable"),
+        "publish_window_days": int(detail.get("publish_window_days") or (180 if requested else 0)),
+    }
+
+
+def _add_candidates(
+    project: VideoDesignProject,
+    scene: ScenePlan,
+    results,
+    limit: int,
+    source: str,
+    keyword: str,
+    search_group_id: str = "",
+    popularity: dict | None = None,
+) -> list[str]:
     existing = {
         (candidate.source, candidate.source_result_id or candidate.douyin_result_id)
         for candidate in project.candidates
         if candidate.scene_id == scene.scene_id
     }
     candidate_ids = []
-    for result in results:
+    for source_rank, result in enumerate(results, start=1):
         if (source, result.result_id) in existing:
             continue
-        candidate = _candidate_from_public_result(scene, result, len(project.candidates) + 1, source, keyword)
+        candidate = _candidate_from_public_result(
+            scene,
+            result,
+            source_rank,
+            source,
+            keyword,
+            search_group_id=search_group_id,
+            popularity=popularity,
+        )
         project.candidates.append(candidate)
         candidate_ids.append(candidate.candidate_id)
         if len(candidate_ids) >= limit:
@@ -2050,6 +2583,8 @@ def _candidate_from_public_result(
     index: int,
     source: str = "douyinsearch",
     keyword: str = "",
+    search_group_id: str = "",
+    popularity: dict | None = None,
 ) -> MediaCandidate:
     source_item_id = str(getattr(result, "douyin_aweme_id", "") or getattr(result, "pin_id", "") or "")
     title = result.title or result.description or source_item_id
@@ -2066,6 +2601,7 @@ def _candidate_from_public_result(
         candidate_id=f"cand_{uuid.uuid4().hex}",
         source=source,
         scene_id=scene.scene_id,
+        search_group_id=search_group_id or scene.search_group_id,
         source_result_id=result.result_id,
         source_item_id=source_item_id,
         source_url=str(getattr(result, "source_url", "") or ""),
@@ -2080,19 +2616,26 @@ def _candidate_from_public_result(
         remote_stream_url=remote_stream_url,
         remote_download_url=remote_download_url,
         duration=duration,
-        match_reason=f"{source_label(source)} result {index} for scene {scene.order}.",
+        source_rank=index,
+        stats=dict(getattr(result, "stats", {}) or {}),
+        popularity=dict(popularity or {}),
+        match_reason=f"{source_label(source)} result {index} from the shared search pool.",
     )
 
 
 def _search_errors_for_scene(project: VideoDesignProject, scene_id: str) -> list[dict]:
     errors = []
+    scene = next((item for item in project.scenes if item.scene_id == scene_id), None)
+    search_group_id = scene.search_group_id if scene else ""
     for task in project.search_tasks:
-        if task.scene_id != scene_id or not task.error:
+        belongs_to_scene = task.scene_id == scene_id or (search_group_id and task.search_group_id == search_group_id)
+        if not belongs_to_scene or not task.error:
             continue
         errors.append(
             {
                 "source": task.source,
                 "keyword": task.keyword,
+                "search_group_id": task.search_group_id,
                 "code": task.error.get("code", "MATERIAL_SEARCH_FAILED"),
                 "message": task.error.get("message", ""),
                 "retryable": bool(task.error.get("retryable", False)),
