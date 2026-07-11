@@ -92,6 +92,7 @@ from app.videodesign.materials.search_plan import (
 )
 from app.videodesign.materials.service import MaterialsService
 from app.videodesign.planner import estimate_duration, make_caption_chunks, refresh_scene_orders, split_script
+from app.videodesign.project_service import ProjectService
 from app.videodesign.project_state import (
     _delete_project_file,
     _mark_preview_stale,
@@ -175,6 +176,7 @@ class VideoDesignService:
         self.script_client = DeepSeekScriptClient()
         self.tts_client = TTSClient()
         self.ytdlp = YtDlpDownloader()
+        self.projects = ProjectService(self.store, self.script_client)
         self.materials = MaterialsService(self.store, self.script_client, self.ytdlp)
         self.voiceover = VoiceoverService(self.store, self.tts_client)
         self.sfx = SFXService(self.store)
@@ -192,135 +194,40 @@ class VideoDesignService:
         }
 
     def create_project(self, request: CreateProjectRequest) -> dict:
-        project = VideoDesignProject(
-            project_id=f"vdp_{uuid.uuid4().hex}",
-            idea=(request.idea or "").strip(),
-            script=(request.script or "").strip(),
-            script_source="user" if (request.script or "").strip() else "deepseek_pending",
-            target_platform=request.target_platform,
-            aspect_ratio=request.aspect_ratio,
-            target_duration_seconds=request.target_duration_seconds,
-            language=request.language,
-            style_brief=request.style_brief,
-            created_at=datetime.now(timezone.utc).isoformat(),
-        )
-        self.store.put(project)
-        return {"success": True, "project": project.model_dump()}
+        return self.projects.create_project(request)
 
     def list_projects(self) -> dict:
-        projects = sorted(self.store.list(), key=_project_sort_value, reverse=True)
-        return {"success": True, "projects": [_project_summary(project) for project in projects]}
+        return self.projects.list_projects()
 
     def get_project(self, project_id: str) -> dict:
-        project = self.store.get(project_id)
-        return {"success": True, "project": project.model_dump()}
+        return self.projects.get_project(project_id)
 
     def update_project(self, project_id: str, patch: dict) -> dict:
-        project = self.store.get(project_id)
-        for key in ("idea", "script", "target_platform", "aspect_ratio", "target_duration_seconds", "language", "style_brief"):
-            if key in patch:
-                value = patch[key]
-                setattr(project, key, value.strip() if isinstance(value, str) else value)
-        if "script" in patch:
-            project.script_source = "user" if (project.script or "").strip() else "deepseek_pending"
-        self.store.put(project)
-        return {"success": True, "project": project.model_dump()}
+        return self.projects.update_project(project_id, patch)
 
     def set_preset(self, project_id: str, preset: dict) -> dict:
-        project = self.store.get(project_id)
-        project.design_preset = preset
-        self.store.put(project)
-        return {"success": True, "project": project.model_dump()}
+        return self.projects.set_preset(project_id, preset)
 
     def set_split_settings(self, project_id: str, settings_request: SplitSettings) -> dict:
-        project = self.store.get(project_id)
-        project.split_settings = settings_request
-        self.store.put(project)
-        return {"success": True, "project": project.model_dump()}
+        return self.projects.set_split_settings(project_id, settings_request)
 
     async def generate_script(self, project_id: str, request: ScriptGenerateRequest) -> dict:
-        project = self.store.get(project_id)
-        idea = (request.idea or project.idea).strip()
-        if not idea:
-            raise VideoDesignError(INVALID_PROJECT_INPUT, "Idea is required for DeepSeek script generation.")
-        data = await self.script_client.generate(
-            idea=idea,
-            target_duration_seconds=request.target_duration_seconds or project.target_duration_seconds,
-            tone=request.tone or project.style_brief,
-            language=request.language or project.language,
-        )
-        project.idea = idea
-        project.script = str(data.get("script") or "")
-        project.script_source = "deepseek"
-        if data.get("scenes"):
-            project.scenes = _scenes_from_deepseek(data["scenes"], project.split_settings)
-            _reset_material_search_plan(project)
-        self.store.put(project)
-        return {"success": True, "project": project.model_dump(), "script_result": data}
+        return await self.projects.generate_script(project_id, request)
 
     def plan(self, project_id: str) -> dict:
-        project = self.store.get(project_id)
-        if not project.script.strip():
-            raise VideoDesignError(SCRIPT_REQUIRED, "Script is required before planning scenes.")
-        project.scenes = split_script(project.script, project.split_settings)
-        _reset_material_search_plan(project)
-        self.store.put(project)
-        return {"success": True, "project_id": project.project_id, "scenes": [scene.model_dump() for scene in project.scenes]}
+        return self.projects.plan(project_id)
 
     def update_scene(self, project_id: str, scene_id: str, patch: dict) -> dict:
-        project = self.store.get(project_id)
-        scene = _scene(project, scene_id)
-        for key in (
-            "voiceover_text",
-            "tts_text",
-            "on_screen_text",
-            "caption_text",
-            "visual_brief",
-            "matching_keywords",
-            "negative_keywords",
-            "visual_search_plan",
-        ):
-            if key in patch:
-                setattr(scene, key, patch[key])
-        if "voiceover_text" in patch and "tts_text" not in patch:
-            scene.tts_text = scene.voiceover_text
-        self.store.put(project)
-        return {"success": True, "scene": scene.model_dump()}
+        return self.projects.update_scene(project_id, scene_id, patch)
 
     def update_scene_clip(self, project_id: str, scene_id: str, request: SceneClipPatch) -> dict:
         return self.studio.update_scene_clip(project_id, scene_id, request)
 
     def split_scene(self, project_id: str, scene_id: str) -> dict:
-        project = self.store.get(project_id)
-        scene = _scene(project, scene_id)
-        words = scene.voiceover_text.split()
-        if len(words) < 4:
-            raise VideoDesignError(INVALID_PROJECT_INPUT, "Scene is too short to split.")
-        midpoint = len(words) // 2
-        first = " ".join(words[:midpoint])
-        second = " ".join(words[midpoint:])
-        index = project.scenes.index(scene)
-        replacement = split_script(f"{first}\n{second}", SplitSettings(split_mode="manual", max_words_per_scene=project.split_settings.max_words_per_scene))
-        project.scenes[index : index + 1] = replacement
-        refresh_scene_orders(project.scenes)
-        _reset_material_search_plan(project)
-        self.store.put(project)
-        return {"success": True, "scenes": [item.model_dump() for item in project.scenes]}
+        return self.projects.split_scene(project_id, scene_id)
 
     def merge_scenes(self, project_id: str, scene_ids: list[str]) -> dict:
-        project = self.store.get(project_id)
-        selected = [scene for scene in project.scenes if scene.scene_id in scene_ids]
-        if len(selected) < 2:
-            raise VideoDesignError(INVALID_PROJECT_INPUT, "At least two scenes are required to merge.")
-        merged_text = " ".join(scene.voiceover_text for scene in selected)
-        merged = split_script(merged_text, SplitSettings(split_mode="manual", max_words_per_scene=999))[0]
-        first_index = project.scenes.index(selected[0])
-        project.scenes = [scene for scene in project.scenes if scene.scene_id not in scene_ids]
-        project.scenes.insert(first_index, merged)
-        refresh_scene_orders(project.scenes)
-        _reset_material_search_plan(project)
-        self.store.put(project)
-        return {"success": True, "scenes": [item.model_dump() for item in project.scenes]}
+        return self.projects.merge_scenes(project_id, scene_ids)
 
     async def generate_tts(self, project_id: str, request: TTSGenerateRequest) -> dict:
         return await self.voiceover.generate_tts(project_id, request)
@@ -352,8 +259,7 @@ class VideoDesignService:
         return self.materials.review(project_id)
 
     def progress(self, project_id: str) -> dict:
-        project = self.store.get(project_id)
-        return {"success": True, "project_id": project.project_id, "progress": project.progress.model_dump()}
+        return self.projects.progress(project_id)
 
     def select_scene(self, project_id: str, scene_id: str, request: SceneSelectionRequest) -> dict:
         return self.materials.select_scene(project_id, scene_id, request)
@@ -445,21 +351,6 @@ class VideoDesignService:
     def apply_sfx_suggestions(self, project_id: str, request: SFXApplyRequest) -> dict:
         return self.sfx.apply_sfx_suggestions(project_id, request)
 
-    def _set_progress(
-        self,
-        project: VideoDesignProject,
-        stage: str,
-        message: str,
-        current: int,
-        total: int,
-        detail: dict | None = None,
-    ) -> None:
-        project.progress.stage = stage
-        project.progress.message = message
-        project.progress.current = current
-        project.progress.total = total
-        project.progress.detail = detail or {}
-        self.store.put(project)
 
 
 
@@ -688,29 +579,6 @@ class VideoDesignService:
 
 
 
-def _scenes_from_deepseek(items: list, split_settings: SplitSettings) -> list[ScenePlan]:
-    scenes = []
-    for index, item in enumerate(items, start=1):
-        voiceover = str(item.get("voiceover_text") or item.get("voiceover") or "")
-        if not voiceover:
-            continue
-        duration = estimate_duration(voiceover)
-        scenes.append(
-            ScenePlan(
-                scene_id=f"scn_{uuid.uuid4().hex}",
-                order=index,
-                voiceover_text=voiceover,
-                tts_text=voiceover,
-                on_screen_text=str(item.get("on_screen_text") or item.get("headline") or ""),
-                caption_text=voiceover,
-                caption_chunks=make_caption_chunks(voiceover, duration),
-                visual_brief=str(item.get("visual_brief") or voiceover),
-                matching_keywords=_normalize_keywords(item.get("search_keywords", []), 1) or _normalize_keywords([voiceover], 1),
-                duration_seconds=max(split_settings.min_scene_duration_seconds, min(split_settings.max_scene_duration_seconds, duration)),
-                template_scene_id="auto",
-            )
-        )
-    return refresh_scene_orders(scenes)
 
 
 videodesign_service = VideoDesignService()
