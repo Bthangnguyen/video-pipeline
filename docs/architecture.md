@@ -1,116 +1,120 @@
-# Module Architecture
+# Application Architecture
 
 ## High-Level Shape
 
 ```mermaid
 flowchart LR
-    UI["Minimal Test UI"] --> API["DouyinSearch API"]
-    API --> Service["DouyinSearch Service"]
-    Service --> Browser["Playwright Search Client"]
-    Service --> Direct["Direct API Client"]
-    Service --> Store["Result Store / TTL Cache"]
-    API --> Stream["Stream Proxy"]
-    Stream --> Resolver["Stream Resolver"]
-    Resolver --> Browser
-    Resolver --> Direct
+    UI["Static browser UI"] --> API["FastAPI routers"]
+    API --> DS["DouyinSearch"]
+    API --> PS["PinterestSearch"]
+    API --> VD["VideoDesign facade"]
+    VD --> Project["Project service"]
+    VD --> Voice["Voiceover service"]
+    VD --> Materials["Materials service"]
+    VD --> Studio["Studio service"]
+    VD --> Render["Render service"]
+    VD --> SFX["SFX service"]
+    Materials --> DS
+    Materials --> PS
+    Project --> Store["Redis and project files"]
+    Voice --> Store
+    Materials --> Store
+    Studio --> Store
+    Render --> Store
 ```
 
-## Boundary
+The application contains three product modules. DouyinSearch and PinterestSearch own source
+discovery and stream/proxy behavior. VideoDesign coordinates project creation, voiceover,
+material selection, Studio timeline editing, preview, and export.
 
-This module owns only Douyin search and preview streaming.
+## HTTP Boundary
 
-The module does not know about projects, timelines, render jobs, or future modules. Later integration should call this module through its API or import its service layer.
+`app/main.py` mounts three routers:
 
-## Components
+- `/api/douyin/*` for Douyin health, search, result metadata, cover, and stream access;
+- `/api/pinterest/*` for Pinterest health, search, media proxy, and download access;
+- `/api/videodesign/*` for the production workflow and Studio.
 
-### DouyinSearch API
+The static pages are served at `/`, `/pinterestsearch`, and `/videodesign`. API route shapes
+are protected by a characterization test.
 
-FastAPI routes for:
+## Search Modules
 
-- health/session checks
-- search
-- result metadata
-- video stream proxy
-- cookie diagnostics
+Each search module owns its browser session, cookie loading, source parser, normalized
+results, and short-lived result store. Douyin uses a persistent Playwright context as its
+working path. Pinterest provides equivalent source-owned search and media resolution.
 
-### DouyinSearch Service
+VideoDesign consumes normalized search results through these service boundaries. It does
+not duplicate browser automation in the Materials domain.
 
-Coordinates the search strategies and returns normalized results.
+## VideoDesign Backend
 
-Decision flow:
-
-1. Validate input.
-2. Optionally translate keyword.
-3. Try direct API if enabled.
-4. Use Playwright browser search when direct API is disabled or fails.
-5. Normalize results.
-6. Store short-lived result records.
-7. Return streamable response.
-
-### Playwright Search Client
-
-Owns browser context, cookie loading, page navigation, search input automation, response capture, and DOM fallback parsing.
-
-### Direct API Client
-
-Optional fast path for Douyin web API. It can search when cookies/signatures are valid, but it must not be required for the module to work.
-
-### Stream Proxy
-
-The frontend never plays raw Douyin media URLs directly. It plays module-owned URLs:
+`VideoDesignService` remains the compatibility object imported by the API. It constructs
+shared dependencies and delegates to domain services:
 
 ```text
-/api/douyin/results/{result_id}/stream
+app/videodesign/
+  service.py                    compatibility facade
+  project_service.py            project, script, planning, scenes
+  voiceover_service.py          TTS, global voiceover, timing
+  project_state.py              shared project selectors and invalidation
+  materials/
+    search_plan.py              search groups and keyword normalization
+    candidates.py               candidate and source mapping
+    proxy.py                    local preview proxies
+    service.py                  search, review, approval, download, prune
+  studio/
+    service.py                  timeline and editor state mutations
+    render.py                   FFmpeg preview and export
+    sfx.py                      catalog, event suggestions, timeline SFX
 ```
 
-The proxy attaches headers/cookies when needed and supports HTTP Range requests.
+The facade preserves selected helper and dependency patch points while old tests and callers
+still depend on them. New domain behavior belongs in the owning service, not in the facade.
 
-### Result Store
+## VideoDesign Frontend
 
-V1 can use in-memory TTL cache. The cache maps `result_id` to normalized result metadata and the latest resolved stream handle.
-
-Later, this can move to SQLite if persistence is needed.
-
-## Suggested Package Layout
+The frontend uses native browser ES modules and has no bundler:
 
 ```text
-app/
-  main.py
-  api/
-    douyin.py
-  douyinsearch/
-    __init__.py
-    service.py
-    schemas.py
-    errors.py
-    cookies.py
-    browser_client.py
-    direct_api_client.py
-    parser.py
-    stream_proxy.py
-    result_store.py
-  static/
-    index.html
-    app.js
-    style.css
-docs/
+app/static/videodesign.js       module entrypoint
+app/static/videodesign/
+  main.js                       bootstrap
+  workflow.js                   top-level flow and render orchestration
+  state.js                      shared application state
+  api.js                        HTTP and progress helpers
+  ui.js                         shared UI state
+  utils.js                      pure helpers
+  project.js                    project, script, template, and TTS views
+  materials.js                  search groups, candidates, and approval
+  studio/
+    index.js                    Studio coordinator
+    audio.js                    voice, music, and SFX controls
+    panels.js                   Studio inspectors
+    playback.js                 synchronized preview playback
+    stage.js                    video stage and draggable overlays
+    timeline.js                 ruler, clips, playhead, drag, and resize
 ```
 
-## Runtime Dependencies
+Dependency direction is entrypoint to workflow, workflow to feature modules, and feature
+modules to shared state/API/utilities. Shared modules do not import feature modules.
 
-- Python 3.11+
-- FastAPI
-- Uvicorn
-- HTTPX
-- Playwright
-- Chromium installed through Playwright
+## Persistence And Media
 
-## Configuration
+`VideoDesignStore` keeps project state in Redis when configured and retains project-owned
+files under the storage directory. Existing JSON/Redis payloads are loaded without a manual
+migration. Downloaded source media and generated proxies, TTS, music, previews, and exports
+remain project-owned files.
 
-```env
-DOUYIN_COOKIE_FILE=./secrets/douyin-cookies.json
-DOUYIN_BROWSER_HEADLESS=true
-DOUYIN_BROWSER_PROFILE_DIR=./storage/browser/douyin
-DOUYIN_USE_DIRECT_API=false
-DOUYIN_RESULT_TTL_SECONDS=1800
-```
+yt-dlp handles source downloads where possible. FFmpeg creates preview proxies, combines
+voice/music/SFX, applies timeline transforms and transitions, and renders preview/export
+files.
+
+## Compatibility Rules
+
+1. Keep API paths and response shapes stable during extraction work.
+2. Keep persisted project and timeline models backward compatible.
+3. Keep global voiceover as the source of truth for scene timing.
+4. Keep search/browser concerns inside the source modules.
+5. Keep timeline mutation separate from expensive rendering.
+6. Add behavior to the owning domain module rather than growing the facade again.

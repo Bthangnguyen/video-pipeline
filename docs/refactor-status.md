@@ -1,46 +1,46 @@
 # VideoDesign Refactor Status
 
-Status: active, stable checkpoint. Branch: `codex/refactor-videodesign-boundaries`.
+Status: extraction complete, cleanup checkpoint. Branch:
+`codex/refactor-videodesign-boundaries`.
 
-This document records the exact handoff point for the refactor described in
-`docs/refactor-plan.md`. The refactor is extraction-only: API routes, persisted project JSON,
-and visible product behavior must remain compatible.
+This document records the current state of the extraction-only refactor in
+`docs/refactor-plan.md`. API routes, persisted project JSON, Redis payloads, DOM IDs, and
+visible product behavior remain compatibility constraints.
 
 ## Verification At This Checkpoint
 
 ```text
-python -m compileall -q app  -> pass
-python -m pytest -q          -> 81 passed
+python -m compileall -q app                    -> pass
+python -m pytest -q                            -> 83 passed
+node --check app/static/videodesign/**/*.js    -> pass
+node --test tests/js/videodesign-utils.test.mjs -> 2 passed
+git diff --check                               -> pass
 ```
 
-The VideoDesign route-contract test and legacy-project payload test are active. The local
-`design template/` directory remains untracked and is not part of any refactor commit.
+The Python suite includes the VideoDesign route contract, legacy project compatibility,
+and local ES-module import resolution. Browser/layout verification is intentionally omitted
+from this checkpoint at the user's request. The local `design template/` directory remains
+untracked and is not part of the refactor.
 
 ## Completed
 
 ### Phase 1: Characterization And Test Boundaries
 
-- Split the former 2,003-line `tests/test_videodesign.py` into project, voiceover,
-  Materials search/planning/download, Studio, render, and SFX test files.
+- Split the former 2,003-line VideoDesign test file by project, voiceover, Materials,
+  Studio, render, and SFX domains.
+- Added fixed route-contract and legacy-project compatibility coverage.
 - Kept every VideoDesign test file below 650 lines.
-- Added a fixed method/path contract for all `/api/videodesign/*` routes.
-- Added compatibility coverage for project payloads created before search pools, smooth
-  previews, global voiceover, and scene clips.
-- Added shared test helpers without changing production behavior.
 
 Commit: `fd765bc Split VideoDesign characterization tests by domain`.
 
 ### Phase 2: Materials Backend
 
-- Extracted shared search-pool normalization, hook/base/exact grouping, keyword cleanup,
-  grounding, and legacy-plan compatibility to `materials/search_plan.py`.
-- Extracted candidate mapping, source URL/cookie resolution, per-scene materialization,
-  recovery, and popularity metadata to `materials/candidates.py`.
-- Extracted proxy generation to `materials/proxy.py`.
-- Extracted keyword generation, search orchestration, preflight, review, approval, download,
-  and pruning to `materials/service.py`.
-- Kept `videodesign_service` as the API facade and preserved the existing monkeypatch points
-  for DeepSeek, yt-dlp, and preview proxies.
+- Extracted search-plan normalization and shared-pool planning to
+  `materials/search_plan.py`.
+- Extracted candidate/source handling and proxy creation to Materials-owned modules.
+- Extracted keyword generation, source search, review, approval, download, and pruning to
+  `materials/service.py`.
+- Preserved DeepSeek, yt-dlp, Douyin, Pinterest, and facade monkeypatch points.
 
 Commits:
 
@@ -49,102 +49,79 @@ Commits:
 
 ### Phase 3: Voiceover And SFX
 
-- Extracted global/scene TTS, clear TTS, combined voiceover, timing offsets, and caption
-  timing updates to `voiceover_service.py`.
-- Kept global voiceover as the timing source of truth.
-- Extracted the SFX catalog, transition mappings, event suggestions, generated fallback
-  tones, and timeline application to `studio/sfx.py`.
-- Moved shared project selectors, safe file deletion, preview invalidation, and project
-  summary helpers to `project_state.py`.
+- Extracted global/scene TTS, combined voiceover, timing offsets, and caption timing to
+  `voiceover_service.py`.
+- Extracted the SFX catalog, event suggestions, transition mappings, and timeline
+  application to `studio/sfx.py`.
+- Extracted shared project selectors and preview invalidation to `project_state.py`.
 
 Commits:
 
 - `9943fa9 Extract VideoDesign voiceover service`
 - `c851a28 Extract event-driven SFX domain`
 
-### Phase 4A: Render Backend
+### Phase 4: Studio, Render, And Facade
 
-- Extracted smooth-preview/export orchestration and the FFmpeg video/audio filter graph to
-  `studio/render.py`.
-- Added `studio/constants.py` for the shared minimum timeline item duration.
-- Preserved the facade-level `_render_smooth_preview_file` patch point used by tests.
-- Restored the SFX catalog's `@lru_cache` decorator after mechanical extraction.
-- Full suite is green after the extraction.
+- Extracted smooth-preview/export orchestration and FFmpeg graphs to `studio/render.py`.
+- Extracted timeline creation, clips, music, item CRUD, and transitions to
+  `studio/service.py`.
+- Extracted project creation, scripts, planning, scene updates, split, and merge to
+  `project_service.py`.
+- Reduced `VideoDesignService` from 3,883 lines to a 584-line compatibility facade.
 
-This render checkpoint is committed together with this status document.
+Commits:
+
+- `5008b54 Extract VideoDesign render pipeline`
+- `1660a10 Extract Studio timeline service`
+- `3db3d02 Reduce VideoDesignService to a facade`
+
+### Phase 5: Frontend Core, Project, And Materials
+
+- Converted the VideoDesign frontend to native ES modules without adding a build tool.
+- Extracted state, API, UI, pure utilities, project workflow, and Materials workflow.
+- Added a static import-resolution test and Node tests for pure frontend helpers.
+
+Commits:
+
+- `a89eeb2 Introduce VideoDesign frontend module core`
+- `c9b4cca Extract Project and Materials frontend modules`
+
+### Phase 6: Studio Frontend And CSS
+
+- Reduced `videodesign/main.js` to a three-line bootstrap and moved top-level workflow
+  orchestration to `workflow.js`.
+- Split Studio ownership across `audio.js`, `panels.js`, `playback.js`, `stage.js`, and
+  `timeline.js`, coordinated by `studio/index.js`.
+- Split the original 2,975-line stylesheet into shared, VideoDesign base, Materials,
+  Studio, and responsive stylesheets while preserving cascade order.
+- Kept all production Python, JavaScript, and CSS files below 1,000 lines.
+
+This Phase 6 checkpoint is committed together with this status update.
 
 ## Current File Sizes
 
 ```text
-app/videodesign/service.py                  1,190 lines
-app/videodesign/materials/search_plan.py      762 lines
-app/videodesign/materials/service.py          697 lines
-app/videodesign/studio/sfx.py                 658 lines
-app/videodesign/studio/render.py              466 lines
-app/videodesign/materials/candidates.py       326 lines
-app/videodesign/voiceover_service.py          249 lines
-app/videodesign/project_state.py              112 lines
+app/videodesign/service.py                         584 lines
+app/videodesign/studio/service.py                  598 lines
+app/videodesign/materials/search_plan.py           762 lines
+app/videodesign/materials/service.py               697 lines
+app/static/videodesign/main.js                       3 lines
+app/static/videodesign/materials.js                798 lines
+app/static/videodesign/studio/playback.js          770 lines
+app/static/videodesign/studio/panels.js            719 lines
+app/static/style.css                               710 lines
+app/static/styles/videodesign-studio.css           990 lines
 ```
 
-The original `service.py` baseline was 3,883 lines. It is now 1,190 lines before the Studio
-timeline extraction.
+The largest production Python, JavaScript, or CSS file is now 990 lines.
 
-## Not Completed
+## Remaining Cleanup
 
-### Phase 4B: Studio Timeline Service
+- Remove facade compatibility imports only after tests and callers no longer patch them.
+- Add focused Node tests when Studio behavior next changes; extraction itself remains
+  covered by syntax and import-resolution gates.
+- Consider splitting `app/api/videodesign.py` only if route ownership becomes difficult to
+  scan. It is not required by the current size target.
+- Run product-flow and responsive browser acceptance when visual QA is requested again.
 
-The following still lives in `app/videodesign/service.py` and must move to
-`studio/service.py`:
-
-- timeline creation and clearing;
-- scene clip updates and timeline synchronization;
-- background-music upload and file lookup;
-- timeline item create/patch/delete;
-- per-scene, apply-all, and randomized transitions;
-- scene clip, transform, layer, timeline-bound, and transition helper functions.
-
-Compatibility requirement: `create_studio_timeline()` must continue to use the facade's
-preview-proxy patch point so existing tests and integrations behave identically.
-
-### Project Service And Thin Facade
-
-Project creation, script generation, planning, scene split/merge, and project updates still
-live directly in `service.py`. After Studio extraction they should move to
-`project_service.py`, leaving `VideoDesignService` as a facade below 600 lines.
-
-### Frontend JavaScript
-
-`app/static/videodesign.js` is still the original large global-scope file. It has not yet
-been converted to native ES modules. The remaining target modules are:
-
-- `videodesign/state.js`, `api.js`, and `utils.js`;
-- `videodesign/project.js`;
-- `videodesign/materials.js`;
-- `videodesign/studio/panels.js`, `stage.js`, `timeline.js`, and `playback.js`;
-- a `videodesign.js` entrypoint below 150 lines.
-
-No frontend behavior has been intentionally changed during the backend extraction.
-
-### CSS
-
-`app/static/style.css` has not been split. VideoDesign base, Materials, and Studio rules still
-need to move to separate stylesheets, each below 1,000 lines, while preserving stylesheet
-order and mobile behavior.
-
-### Final Cleanup And QA
-
-- Remove temporary facade compatibility imports after owning-module tests no longer patch
-  them.
-- Add Node tests for pure frontend helpers and a static local-import resolver check.
-- Update `docs/architecture.md` after module boundaries are final.
-- Run desktop/mobile browser acceptance for project creation, Materials, Studio playback,
-  timeline interaction, smooth preview, and export.
-- Confirm no production Python or JavaScript file exceeds 1,000 lines and no stylesheet
-  exceeds 1,000 lines.
-
-## Recommended Next Step
-
-Extract `StudioService` first. Its methods and helper functions are already the largest
-remaining cohesive block in `service.py`; moving them should reduce the facade close to the
-600-line target without touching frontend behavior. Run the Studio, render, SFX, and full
-test suites before committing that extraction.
+No further structural extraction is required to meet the metrics in the refactor plan.
