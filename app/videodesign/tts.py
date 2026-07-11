@@ -2,6 +2,7 @@ import uuid
 import wave
 from pathlib import Path
 
+from app.videodesign.audio import measure_audio_duration
 from app.videodesign.config import settings
 from app.videodesign.errors import TTS_GENERATION_FAILED, TTS_PROVIDER_UNAVAILABLE, VideoDesignError
 from app.videodesign.planner import estimate_duration, make_caption_chunks
@@ -16,16 +17,16 @@ class TTSResult:
 
 
 class TTSClient:
-    async def generate(self, text: str, project_id: str, scene_id: str, provider: str, voice_id: str) -> TTSResult:
+    async def generate(self, text: str, project_id: str, scene_id: str, provider: str, voice_id: str, voice_speed: float = 1) -> TTSResult:
         storage_dir = settings.storage_dir / project_id / "audio"
         storage_dir.mkdir(parents=True, exist_ok=True)
         if provider in ("free_tts", "edge_tts"):
-            return await self._edge_tts(text, storage_dir, scene_id, voice_id)
+            return await self._edge_tts(text, storage_dir, scene_id, voice_id, voice_speed)
         if provider == "timing_only":
-            return self._timing_only(text, storage_dir, scene_id)
+            return self._timing_only(text, storage_dir, scene_id, voice_speed)
         raise VideoDesignError(TTS_PROVIDER_UNAVAILABLE, f"TTS provider is not supported: {provider}")
 
-    async def _edge_tts(self, text: str, storage_dir: Path, scene_id: str, voice_id: str) -> TTSResult:
+    async def _edge_tts(self, text: str, storage_dir: Path, scene_id: str, voice_id: str, voice_speed: float) -> TTSResult:
         try:
             import edge_tts
         except ImportError as exc:
@@ -35,17 +36,18 @@ class TTSClient:
                 retryable=False,
             ) from exc
 
-        duration = estimate_duration(text)
         audio_path = storage_dir / f"{scene_id}_{uuid.uuid4().hex}.mp3"
         try:
-            communicate = edge_tts.Communicate(text, voice_id or settings.tts_voice_id)
+            rate = _edge_rate(voice_speed)
+            communicate = edge_tts.Communicate(text, voice_id or settings.tts_voice_id, rate=rate)
             await communicate.save(str(audio_path))
         except Exception as exc:
             raise VideoDesignError(TTS_GENERATION_FAILED, f"TTS generation failed: {exc}", retryable=True) from exc
+        duration = measure_audio_duration(audio_path) or estimate_duration(text)
         return TTSResult(audio_path=audio_path, duration_seconds=duration, caption_chunks=make_caption_chunks(text, duration))
 
-    def _timing_only(self, text: str, storage_dir: Path, scene_id: str) -> TTSResult:
-        duration = estimate_duration(text)
+    def _timing_only(self, text: str, storage_dir: Path, scene_id: str, voice_speed: float) -> TTSResult:
+        duration = estimate_duration(text) / _safe_speed(voice_speed)
         audio_path = storage_dir / f"{scene_id}_{uuid.uuid4().hex}.wav"
         sample_rate = 8000
         frame_count = int(duration * sample_rate)
@@ -54,4 +56,17 @@ class TTSClient:
             handle.setsampwidth(2)
             handle.setframerate(sample_rate)
             handle.writeframes(b"\x00\x00" * frame_count)
+        duration = measure_audio_duration(audio_path) or duration
         return TTSResult(audio_path=audio_path, duration_seconds=duration, caption_chunks=make_caption_chunks(text, duration))
+
+
+def _safe_speed(value: float) -> float:
+    try:
+        return max(0.5, min(1.5, float(value or 1)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _edge_rate(voice_speed: float) -> str:
+    percent = int(round((_safe_speed(voice_speed) - 1) * 100))
+    return f"{percent:+d}%"

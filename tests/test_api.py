@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.douyinsearch.schemas import DouyinResult
+from app.douyinsearch.direct_api_client import DirectApiClient
 from app.douyinsearch.service import douyin_service
 
 
@@ -111,3 +112,11 @@ def test_download_endpoint_returns_attachment(monkeypatch):
     assert response.status_code == 200
     assert response.headers["content-disposition"] == 'attachment; filename="douyin_aweme-download.mp4"'
     assert response.content == b"video"
+
+
+def test_direct_api_popular_first_params():
+    params = DirectApiClient()._build_params("cat", 10, None, {}, popular_first=True)
+
+    assert params["sort_type"] == "1"
+    assert params["publish_time"] == "180"
+    assert params["is_filter_search"] == "1"

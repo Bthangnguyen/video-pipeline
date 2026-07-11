@@ -70,12 +70,30 @@ def parse_dom_cards(cards: list[dict[str, Any]], limit: int) -> list[DouyinResul
                 title=title,
                 description=title,
                 cover_remote_url=str(card.get("cover_url") or ""),
+                stats=_dom_card_stats(card),
                 raw={"href": href, "dom_card": card},
             )
         )
         if len(results) >= limit:
             break
     return results
+
+
+def _dom_card_stats(card: dict[str, Any]) -> dict[str, Any]:
+    like_text = str(card.get("like_text") or "").strip().lower()
+    if not like_text:
+        return {}
+    multiplier = 1
+    if like_text.endswith(("万", "w")):
+        multiplier = 10_000
+        like_text = like_text[:-1]
+    elif like_text.endswith("亿"):
+        multiplier = 100_000_000
+        like_text = like_text[:-1]
+    try:
+        return {"digg_count": int(float(like_text) * multiplier)}
+    except ValueError:
+        return {}
 
 
 def _extract_aweme(item: Any) -> dict[str, Any] | None:
@@ -125,4 +143,3 @@ def _duration_seconds(duration: Any) -> float:
     except (TypeError, ValueError):
         return 0
     return value / 1000 if value > 1000 else value
-

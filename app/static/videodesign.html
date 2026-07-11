@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VideoDesign</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/styles/videodesign-base.css">
+  <link rel="stylesheet" href="/static/styles/videodesign-materials.css">
+  <link rel="stylesheet" href="/static/styles/videodesign-studio.css">
+  <link rel="stylesheet" href="/static/styles/videodesign-responsive.css">
 </head>
 <body class="vd-app-page">
   <div class="vd-shell">
@@ -44,16 +48,11 @@
         <div class="vd-start">
           <section class="vd-hero-panel">
             <p class="vd-kicker">AI short video builder</p>
-            <h2>Turn a script or idea into a reviewable video plan.</h2>
-            <textarea id="start-prompt" placeholder="Create a faceless TikTok video about cat facts, productivity habits, or any short-form idea.">Cats can recognize your voice. They often ignore it anyway. This makes cat videos funny.</textarea>
+            <h2>Start with a script or a clear idea.</h2>
+            <textarea id="start-prompt" placeholder="Paste a finished script, or describe the idea you want DeepSeek to write. Example: Make a 45 second faceless short about why cats stare at people, with a funny but informative tone.">Cats can recognize your voice. They often ignore it anyway. This makes cat videos funny.</textarea>
             <div class="vd-start-controls">
               <label>Duration <input id="start-duration" type="range" min="15" max="120" step="5" value="45"></label>
               <strong id="start-duration-label">45 seconds</strong>
-              <select id="start-platform">
-                <option value="tiktok">TikTok / Douyin</option>
-                <option value="shorts">YouTube Shorts</option>
-                <option value="reels">Reels</option>
-              </select>
             </div>
             <div class="vd-button-row">
               <button id="create-project" class="vd-primary" type="button">Create video</button>
@@ -61,6 +60,11 @@
             </div>
           </section>
           <aside class="vd-side-note">
+            <div class="vd-project-library-head">
+              <h3>Projects</h3>
+              <button id="refresh-projects" type="button">Refresh</button>
+            </div>
+            <div id="project-library" class="vd-project-library"></div>
             <h3>Flow</h3>
             <ol>
               <li>Write or generate script.</li>
@@ -147,32 +151,43 @@
               <p class="vd-kicker">Motion template</p>
               <h2>Transitions and overlays</h2>
               <div class="vd-option-grid">
-                <button class="vd-choice is-selected" data-preset-path="extras.transition_pack_id" data-preset-value="clean_cut" type="button">
-                  <strong>Clean cut</strong>
-                  <span>Fast and stable between scenes</span>
+                <button class="vd-choice is-selected" data-preset-path="extras.transition_pack_id" data-preset-value="fade" type="button">
+                  <strong>Soft fade</strong>
+                  <span>Smooth and stable between scenes</span>
                 </button>
-                <button class="vd-choice" data-preset-path="extras.transition_pack_id" data-preset-value="push_slide" type="button">
-                  <strong>Push slide</strong>
-                  <span>Short social swipe motion</span>
+                <button class="vd-choice" data-preset-path="extras.transition_pack_id" data-preset-value="mix" type="button">
+                  <strong>Mix motion</strong>
+                  <span>Fade, slide, and zoom where useful</span>
                 </button>
-                <button class="vd-choice" data-preset-path="extras.transition_pack_id" data-preset-value="speed_zoom" type="button">
-                  <strong>Speed zoom</strong>
-                  <span>Quick punch-in on scene changes</span>
+                <button class="vd-choice" data-preset-path="extras.transition_pack_id" data-preset-value="none" type="button">
+                  <strong>Clean cuts</strong>
+                  <span>No transition effects</span>
                 </button>
               </div>
               <div class="vd-overlay-grid">
                 <button class="vd-overlay-option is-selected" data-preset-path="extras.overlay_pack_id" data-preset-value="caption_shadow" type="button">
                   <span class="vd-overlay-preview vd-overlay-shadow"></span>
-                  <strong>Caption shadow</strong>
-                </button>
-                <button class="vd-overlay-option" data-preset-path="extras.overlay_pack_id" data-preset-value="focus_frame" type="button">
-                  <span class="vd-overlay-preview vd-overlay-frame"></span>
-                  <strong>Focus frame</strong>
+                  <strong>Light caption shade</strong>
                 </button>
                 <button class="vd-overlay-option" data-preset-path="extras.overlay_pack_id" data-preset-value="soft_vignette" type="button">
                   <span class="vd-overlay-preview vd-overlay-vignette"></span>
                   <strong>Soft vignette</strong>
                 </button>
+                <button class="vd-overlay-option" data-preset-path="extras.overlay_pack_id" data-preset-value="none" type="button">
+                  <span class="vd-overlay-preview"></span>
+                  <strong>No overlay</strong>
+                </button>
+              </div>
+            </section>
+
+            <section class="vd-panel">
+              <p class="vd-kicker">Video defaults</p>
+              <h2>Apply default clip adjustments.</h2>
+              <div class="vd-template-controls">
+                <label><input id="preset-video-flip" type="checkbox"> Flip video horizontally</label>
+                <label>Brightness <input id="preset-video-brightness" type="range" min="0.7" max="1.3" step="0.05" value="1"></label>
+                <label>Contrast <input id="preset-video-contrast" type="range" min="0.7" max="1.5" step="0.05" value="1.08"></label>
+                <label>Saturation <input id="preset-video-saturation" type="range" min="0.6" max="1.6" step="0.05" value="1.08"></label>
               </div>
             </section>
 
@@ -189,14 +204,21 @@
             <section class="vd-panel">
               <p class="vd-kicker">Voice</p>
               <h2>TTS and caption timing</h2>
-              <div class="vd-script-tools">
-                <label>TTS provider
-                  <select id="tts-provider">
-                    <option value="free_tts">free_tts</option>
-                    <option value="timing_only">timing_only</option>
+              <input id="tts-provider" type="hidden" value="free_tts">
+              <div class="vd-template-controls">
+                <label>Voice
+                  <select id="voice-id">
+                    <option value="en-US-AriaNeural">Aria - warm female</option>
+                    <option value="en-US-JennyNeural">Jenny - clear female</option>
+                    <option value="en-US-GuyNeural">Guy - calm male</option>
+                    <option value="en-US-RogerNeural">Roger - deep male</option>
+                    <option value="en-US-AnaNeural">Ana - youthful female</option>
+                    <option value="en-GB-SoniaNeural">Sonia - UK female</option>
                   </select>
                 </label>
-                <label>Voice ID <input id="voice-id" value="en-US-AriaNeural"></label>
+                <label>Read speed <input id="voice-speed" type="range" min="0.8" max="1.25" step="0.05" value="1"></label>
+                <strong id="voice-speed-label">1.00x</strong>
+                <button id="preview-voice" type="button">Preview voice</button>
               </div>
             </section>
           </div>
@@ -250,19 +272,37 @@
             <div id="candidate-board" class="vd-candidate-board"></div>
           </section>
           <aside class="vd-search-panel">
-            <h3>Search this scene</h3>
+            <div class="vd-search-plan-head">
+              <div>
+                <p class="vd-kicker">Shared pools</p>
+                <h3>Search plan</h3>
+              </div>
+              <button id="generate-material-search-plan" type="button">Generate</button>
+            </div>
+            <div id="materials-search-groups" class="vd-search-groups"></div>
+            <div class="vd-group-editor-head">
+              <strong id="materials-group-title">Select a search group</strong>
+              <span id="materials-group-role" class="vd-pool-badge">Base</span>
+            </div>
             <div id="materials-keyword-chips" class="vd-keyword-chips"></div>
-            <label>Scene keywords <textarea id="materials-keywords" placeholder="comma separated"></textarea></label>
-            <button id="save-material-keywords" type="button">Save keywords</button>
+            <label>Douyin keyword <input id="materials-douyin-keyword" placeholder="e.g. 日本生活"></label>
+            <label>Pinterest keyword <input id="materials-pinterest-keyword" placeholder="e.g. Japan life"></label>
+            <div id="materials-visual-notes" class="vd-visual-search-notes"></div>
+            <button id="save-material-keywords" type="button">Save group keywords</button>
+            <label>Scene pool
+              <select id="scene-search-group"></select>
+            </label>
+            <button id="assign-scene-search-group" type="button">Move selected scene</button>
+            <div class="vd-popular-control">
+              <label><input id="popular-first" type="checkbox" checked> Popular first</label>
+              <span>Douyin: most liked in 180 days. Pinterest: platform order.</span>
+            </div>
             <label>Douyin min <input id="douyin-min-count" type="number" min="0" max="10" value="4"></label>
             <label>Pinterest min <input id="pinterest-min-count" type="number" min="0" max="10" value="4"></label>
-            <label>Max keywords <input id="queries-per-scene" type="number" min="1" max="3" value="2"></label>
-            <label><input id="translate-query" type="checkbox" checked> Translate</label>
-            <label><input id="smart-keywords" type="checkbox"> Regenerate keywords</label>
             <button id="run-material-health" type="button">Run health check</button>
             <div id="material-health-panel" class="vd-health-panel"></div>
-            <button id="search-current-scene" class="vd-primary" type="button">Search scene</button>
-            <button id="search-all-scenes" type="button">Search all</button>
+            <button id="search-current-scene" class="vd-primary" type="button">Search selected group</button>
+            <button id="search-all-scenes" type="button">Search all groups</button>
             <div id="search-progress" class="vd-progress-log"></div>
             <div id="materials-search-errors" class="vd-search-errors"></div>
             <div id="materials-preview" class="vd-material-preview"></div>
@@ -279,9 +319,14 @@
             </div>
             <div class="vd-studio-actions">
               <button id="create-timeline" class="vd-primary" type="button">Create timeline</button>
+              <button id="clear-timeline" class="vd-danger" type="button">Clear timeline</button>
+              <button id="build-smooth-preview" type="button">Build smooth preview</button>
+              <button id="toggle-smooth-preview" type="button">Use smooth preview</button>
+              <button id="render-export" type="button">Render export</button>
+              <button id="download-export" type="button">Download MP4</button>
               <button id="studio-play" class="vd-play-button" type="button">Play</button>
               <span id="studio-time" class="vd-timecode">0:00</span>
-              <button type="button" disabled>Export soon</button>
+              <span id="smooth-preview-status" class="vd-preview-state">Preview missing</span>
             </div>
           </header>
 
@@ -291,6 +336,10 @@
               <button data-studio-tool="media" type="button">Media</button>
               <button data-studio-tool="text" type="button">Text</button>
               <button data-studio-tool="captions" type="button">Captions</button>
+              <button data-studio-tool="overlay" type="button">Overlay</button>
+              <button data-studio-tool="transitions" type="button">Transitions</button>
+              <button data-studio-tool="icons" type="button">Icons</button>
+              <button data-studio-tool="audio" type="button">Audio</button>
               <button data-studio-tool="settings" type="button">Settings</button>
             </aside>
             <aside id="studio-tool-panel" class="vd-studio-panel"></aside>
@@ -301,9 +350,13 @@
               </div>
               <div id="studio-stage" class="vd-canvas">
                 <video id="studio-video" playsinline muted></video>
+                <video id="studio-next-video" class="vd-next-video" playsinline muted></video>
                 <audio id="studio-audio" preload="auto"></audio>
+                <audio id="studio-music" preload="auto"></audio>
+                <div id="studio-overlay" class="vd-canvas-overlay"></div>
                 <div id="studio-caption" class="vd-canvas-caption"></div>
                 <div id="studio-text" class="vd-canvas-text" data-draggable-text="true"></div>
+                <div id="studio-icon-layer" class="vd-canvas-icons"></div>
               </div>
             </section>
             <aside id="studio-inspector" class="vd-studio-inspector"></aside>
@@ -333,6 +386,6 @@
     </main>
   </div>
 
-  <script src="/static/videodesign.js"></script>
+  <script type="module" src="/static/videodesign.js"></script>
 </body>
 </html>

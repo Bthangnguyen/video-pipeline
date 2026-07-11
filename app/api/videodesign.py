@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, File, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.videodesign.errors import PROJECT_NOT_FOUND, SCENE_NOT_FOUND, VideoDesignError
+from app.videodesign.errors import AUDIO_NOT_FOUND, PROJECT_NOT_FOUND, SCENE_NOT_FOUND, VideoDesignError
 from app.videodesign.schemas import (
     CreateProjectRequest,
     KeywordGenerateRequest,
@@ -11,11 +11,16 @@ from app.videodesign.schemas import (
     MaterialsPreflightRequest,
     MaterialsPruneRequest,
     MaterialsSearchRequest,
+    MaterialSearchPlan,
     SceneClipPatch,
     SceneSelectionRequest,
+    SFXApplyRequest,
+    SFXSuggestRequest,
     ScriptGenerateRequest,
     SplitSettings,
+    TimelineItemCreateRequest,
     TimelineItemPatch,
+    TransitionRequest,
     TTSGenerateRequest,
 )
 from app.videodesign.service import videodesign_service
@@ -37,6 +42,14 @@ async def health():
 async def create_project(request: CreateProjectRequest):
     try:
         return videodesign_service.create_project(request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects")
+async def list_projects():
+    try:
+        return videodesign_service.list_projects()
     except VideoDesignError as error:
         return error_response(error)
 
@@ -129,10 +142,26 @@ async def generate_tts(project_id: str, request: TTSGenerateRequest):
         return error_response(error)
 
 
+@router.delete("/projects/{project_id}/tts")
+async def clear_tts(project_id: str):
+    try:
+        return videodesign_service.clear_tts(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
 @router.post("/projects/{project_id}/keywords/generate")
 async def generate_keywords(project_id: str, request: KeywordGenerateRequest):
     try:
         return await videodesign_service.generate_scene_keywords(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.patch("/projects/{project_id}/search-plan")
+async def update_search_plan(project_id: str, request: MaterialSearchPlan):
+    try:
+        return videodesign_service.set_material_search_plan(project_id, request)
     except VideoDesignError as error:
         return error_response(error)
 
@@ -145,8 +174,25 @@ async def scene_audio(project_id: str, scene_id: str):
         if not scene:
             raise VideoDesignError(SCENE_NOT_FOUND, "Scene does not exist.")
         if not scene.tts.audio_path:
-            raise VideoDesignError("AUDIO_NOT_FOUND", "Scene audio has not been generated.")
+            raise VideoDesignError(AUDIO_NOT_FOUND, "Scene audio has not been generated.")
         path = Path(scene.tts.audio_path)
+        return FileResponse(path, media_type="audio/mpeg" if path.suffix == ".mp3" else "audio/wav")
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/audio/combined")
+async def build_combined_voiceover(project_id: str):
+    try:
+        return videodesign_service.build_combined_voiceover(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/audio/combined")
+async def combined_voiceover(project_id: str):
+    try:
+        path = videodesign_service.combined_voiceover_path(project_id)
         return FileResponse(path, media_type="audio/mpeg" if path.suffix == ".mp3" else "audio/wav")
     except VideoDesignError as error:
         return error_response(error)
@@ -228,10 +274,21 @@ async def material_file(project_id: str, asset_id: str):
         return error_response(error)
 
 
+@router.get("/projects/{project_id}/materials/{asset_id}/proxy")
+async def material_proxy(project_id: str, asset_id: str):
+    try:
+        path = Path(videodesign_service.material_proxy_path(project_id, asset_id))
+        if not path.exists():
+            raise VideoDesignError("MATERIAL_FILE_NOT_FOUND", "Material preview proxy file does not exist.", retryable=True)
+        return FileResponse(path, media_type="video/mp4")
+    except VideoDesignError as error:
+        return error_response(error)
+
+
 @router.post("/projects/{project_id}/studio")
 async def create_studio(project_id: str):
     try:
-        return videodesign_service.create_studio_timeline(project_id)
+        return await videodesign_service.create_studio_timeline(project_id)
     except VideoDesignError as error:
         return error_response(error)
 
@@ -244,9 +301,163 @@ async def timeline(project_id: str):
         return error_response(error)
 
 
+@router.delete("/projects/{project_id}/timeline")
+async def clear_timeline(project_id: str):
+    try:
+        return videodesign_service.clear_timeline(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/sfx/catalog")
+async def sfx_catalog():
+    try:
+        return videodesign_service.sfx_catalog()
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/sfx/{asset_id}/file")
+async def sfx_file(asset_id: str):
+    try:
+        return FileResponse(videodesign_service.sfx_file_path(asset_id))
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/sfx/suggest")
+async def suggest_sfx(project_id: str, request: SFXSuggestRequest):
+    try:
+        return videodesign_service.suggest_sfx(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/sfx/suggestions")
+async def sfx_suggestions(project_id: str):
+    try:
+        return videodesign_service.sfx_suggestions(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/sfx/apply")
+async def apply_sfx(project_id: str, request: SFXApplyRequest):
+    try:
+        return videodesign_service.apply_sfx_suggestions(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/preview")
+async def preview_status(project_id: str):
+    try:
+        return videodesign_service.preview_status(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/preview/render")
+async def render_preview(project_id: str):
+    try:
+        return await videodesign_service.render_smooth_preview(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/preview/file")
+async def preview_file(project_id: str):
+    try:
+        return FileResponse(videodesign_service.smooth_preview_file_path(project_id), media_type="video/mp4")
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/export/render")
+async def render_export(project_id: str):
+    try:
+        return await videodesign_service.render_export(project_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/export/file")
+async def export_file(project_id: str):
+    try:
+        return FileResponse(
+            videodesign_service.export_file_path(project_id),
+            media_type="video/mp4",
+            filename=videodesign_service.export_filename(project_id),
+        )
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/music/upload")
+async def upload_background_music(project_id: str, file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+        return videodesign_service.upload_background_music(
+            project_id,
+            file.filename or "background-music",
+            content,
+            file.content_type or "",
+        )
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.get("/projects/{project_id}/music/{item_id}/file")
+async def background_music_file(project_id: str, item_id: str):
+    try:
+        return FileResponse(videodesign_service.background_music_file_path(project_id, item_id))
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/timeline/items")
+async def create_timeline_item(project_id: str, request: TimelineItemCreateRequest):
+    try:
+        return videodesign_service.create_timeline_item(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
 @router.patch("/projects/{project_id}/timeline/items/{item_id}")
 async def patch_timeline_item(project_id: str, item_id: str, request: TimelineItemPatch):
     try:
         return videodesign_service.patch_timeline_item(project_id, item_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.delete("/projects/{project_id}/timeline/items/{item_id}")
+async def delete_timeline_item(project_id: str, item_id: str):
+    try:
+        return videodesign_service.delete_timeline_item(project_id, item_id)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/scenes/{scene_id}/transition")
+async def set_scene_transition(project_id: str, scene_id: str, request: TransitionRequest):
+    try:
+        return videodesign_service.set_scene_transition(project_id, scene_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/transitions/apply-all")
+async def apply_all_transitions(project_id: str, request: TransitionRequest):
+    try:
+        return videodesign_service.apply_all_transitions(project_id, request)
+    except VideoDesignError as error:
+        return error_response(error)
+
+
+@router.post("/projects/{project_id}/transitions/randomize")
+async def randomize_transitions(project_id: str):
+    try:
+        return videodesign_service.randomize_transitions(project_id)
     except VideoDesignError as error:
         return error_response(error)

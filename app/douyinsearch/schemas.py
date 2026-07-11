@@ -18,6 +18,7 @@ class SearchRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=50)
     cursor: str | None = None
     strategy: SearchStrategy = "auto"
+    popular_first: bool = False
 
 
 class DouyinResult(BaseModel):

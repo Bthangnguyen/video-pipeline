@@ -27,7 +27,7 @@ class DirectApiClient:
     async def search(self, request: SearchRequest, search_keyword: str | None = None):
         keyword = search_keyword or request.keyword
         cookie_values = self._cookie_values()
-        params = self._build_params(keyword, request.limit, request.cursor, cookie_values)
+        params = self._build_params(keyword, request.limit, request.cursor, cookie_values, request.popular_first)
         params = self._sign_params(params)
         url = f"{self.SEARCH_ENDPOINT}?{urlencode(params)}"
 
@@ -60,9 +60,22 @@ class DirectApiClient:
             "status_code": payload.get("status_code"),
             "has_more": payload.get("has_more"),
             "cursor": payload.get("cursor"),
+            "popularity": {
+                "requested": request.popular_first,
+                "applied": request.popular_first,
+                "method": "direct_api_request" if request.popular_first else "relevance",
+                "publish_window_days": 180 if request.popular_first else 0,
+            },
         }
 
-    def _build_params(self, keyword: str, count: int, cursor: str | None, cookie_values: dict) -> dict:
+    def _build_params(
+        self,
+        keyword: str,
+        count: int,
+        cursor: str | None,
+        cookie_values: dict,
+        popular_first: bool = False,
+    ) -> dict:
         verify_fp = cookie_values.get("s_v_web_id", "")
         uifid = cookie_values.get("UIFID") or cookie_values.get("UIFID_TEMP") or ""
         return {
@@ -73,7 +86,9 @@ class DirectApiClient:
             "keyword": keyword,
             "search_source": "normal_search",
             "query_correct_type": "1",
-            "is_filter_search": "0",
+            "is_filter_search": "1" if popular_first else "0",
+            "sort_type": "1" if popular_first else "0",
+            "publish_time": "180" if popular_first else "0",
             "offset": cursor or "0",
             "count": str(max(count, 10)),
             "need_filter_settings": "1",

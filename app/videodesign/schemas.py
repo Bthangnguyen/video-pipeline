@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field, model_validator
 SplitMode = Literal["auto", "dense", "normal", "sparse", "manual"]
 ApprovalState = Literal["planned", "searching", "needs_review", "approved", "download_pending", "downloaded", "rejected", "placeholder_allowed"]
 CandidateStatus = Literal["proposed", "approved", "rejected"]
+SFXSuggestionStatus = Literal["proposed", "applied", "skipped"]
+SearchGroupRole = Literal["hook", "base", "exact"]
 
 
 class SplitSettings(BaseModel):
@@ -21,6 +23,7 @@ class TTSSettings(BaseModel):
     language: str = "en"
     provider: str = "free_tts"
     voice_id: str = "en-US-AriaNeural"
+    voice_speed: float = Field(default=1, ge=0.5, le=1.5)
 
 
 class CaptionChunk(BaseModel):
@@ -29,11 +32,18 @@ class CaptionChunk(BaseModel):
     end: float
 
 
+class SceneAudioOffset(BaseModel):
+    scene_id: str
+    start_seconds: float
+    end_seconds: float
+
+
 class TTSMeta(BaseModel):
     provider: str = ""
     voice_id: str = ""
     audio_url: str = ""
     audio_path: str = ""
+    duration_seconds: float = 0
     sync_state: str = "pending"
 
 
@@ -77,6 +87,8 @@ class ScenePlan(BaseModel):
     visual_brief: str = ""
     matching_keywords: list[str] = Field(default_factory=list)
     negative_keywords: list[str] = Field(default_factory=list)
+    visual_search_plan: dict[str, Any] = Field(default_factory=dict)
+    search_group_id: str = ""
     template_scene_id: str = ""
     duration_seconds: float = 0
     search_tasks: list[str] = Field(default_factory=list)
@@ -91,6 +103,7 @@ class DouyinSearchTask(BaseModel):
     search_task_id: str
     project_id: str
     scene_id: str
+    search_group_id: str = ""
     source: str = "douyinsearch"
     keyword: str
     translate_to_chinese: bool = True
@@ -105,6 +118,7 @@ class MediaCandidate(BaseModel):
     candidate_id: str
     source: str = "douyinsearch"
     scene_id: str
+    search_group_id: str = ""
     source_result_id: str = ""
     source_item_id: str = ""
     source_url: str = ""
@@ -119,8 +133,28 @@ class MediaCandidate(BaseModel):
     remote_stream_url: str = ""
     remote_download_url: str = ""
     duration: float = 0
+    source_rank: int = 0
+    stats: dict[str, Any] = Field(default_factory=dict)
+    popularity: dict[str, Any] = Field(default_factory=dict)
     match_reason: str = ""
     status: CandidateStatus = "proposed"
+
+
+class MaterialSearchGroup(BaseModel):
+    group_id: str
+    role: SearchGroupRole = "base"
+    label: str = ""
+    exact_subject: str = ""
+    douyin_keyword: str = ""
+    pinterest_keyword: str = ""
+    douyin_fallback: str = ""
+    pinterest_fallback: str = ""
+    scene_ids: list[str] = Field(default_factory=list)
+
+
+class MaterialSearchPlan(BaseModel):
+    popular_first: bool = True
+    groups: list[MaterialSearchGroup] = Field(default_factory=list)
 
 
 class MaterialAsset(BaseModel):
@@ -136,9 +170,36 @@ class MaterialAsset(BaseModel):
     douyin_result_id: str = ""
     douyin_aweme_id: str = ""
     local_path: str
+    proxy_path: str = ""
     media_type: str = "video/mp4"
     duration: float = 0
     download_state: str = "downloaded"
+
+
+class SFXAsset(BaseModel):
+    asset_id: str
+    name: str
+    category: str
+    audio_url: str
+    local_path: str
+    duration_seconds: float
+    default_volume: float = 0.35
+    recommended_events: list[str] = Field(default_factory=list)
+
+
+class SFXSuggestion(BaseModel):
+    suggestion_id: str
+    event_id: str
+    project_id: str
+    scene_id: str = ""
+    event_type: str
+    time_seconds: float
+    duration_hint_seconds: float
+    label: str
+    reason: str
+    asset_id: str
+    volume: float = 0.35
+    status: SFXSuggestionStatus = "proposed"
 
 
 class TimelineItem(BaseModel):
@@ -163,12 +224,29 @@ class TimelineDraft(BaseModel):
     items: list[TimelineItem] = Field(default_factory=list)
 
 
+class SmoothPreview(BaseModel):
+    status: Literal["missing", "rendering", "ready", "stale", "failed"] = "missing"
+    preview_url: str = ""
+    preview_path: str = ""
+    timeline_id: str = ""
+    duration_seconds: float = 0
+    updated_at: str = ""
+    error: dict[str, Any] = Field(default_factory=dict)
+
+
 class ProjectProgress(BaseModel):
     stage: str = "idle"
     message: str = ""
     current: int = 0
     total: int = 0
     detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class VoiceoverTrack(BaseModel):
+    audio_url: str = ""
+    audio_path: str = ""
+    duration_seconds: float = 0
+    scene_offsets: list[SceneAudioOffset] = Field(default_factory=list)
 
 
 class VideoDesignProject(BaseModel):
@@ -186,10 +264,14 @@ class VideoDesignProject(BaseModel):
     split_settings: SplitSettings = Field(default_factory=SplitSettings)
     tts_settings: TTSSettings = Field(default_factory=TTSSettings)
     scenes: list[ScenePlan] = Field(default_factory=list)
+    material_search_plan: MaterialSearchPlan = Field(default_factory=MaterialSearchPlan)
     search_tasks: list[DouyinSearchTask] = Field(default_factory=list)
     candidates: list[MediaCandidate] = Field(default_factory=list)
     material_assets: list[MaterialAsset] = Field(default_factory=list)
+    sfx_suggestions: list[SFXSuggestion] = Field(default_factory=list)
     timeline: TimelineDraft | None = None
+    smooth_preview: SmoothPreview = Field(default_factory=SmoothPreview)
+    voiceover_track: VoiceoverTrack = Field(default_factory=VoiceoverTrack)
     progress: ProjectProgress = Field(default_factory=ProjectProgress)
     created_at: str
 
@@ -221,6 +303,7 @@ class TTSGenerateRequest(BaseModel):
     scene_ids: list[str] | None = None
     provider: str | None = None
     voice_id: str | None = None
+    voice_speed: float | None = Field(default=None, ge=0.5, le=1.5)
 
 
 class KeywordGenerateRequest(BaseModel):
@@ -229,12 +312,14 @@ class KeywordGenerateRequest(BaseModel):
 
 class MaterialsSearchRequest(BaseModel):
     scene_ids: list[str] | None = None
+    group_ids: list[str] | None = None
     candidates_per_scene: int = Field(default=5, ge=1, le=10)
     douyin_min_per_scene: int | None = Field(default=None, ge=0, le=10)
     pinterest_min_per_scene: int = Field(default=0, ge=0, le=10)
     queries_per_scene: int = Field(default=2, ge=1, le=3)
     translate_to_chinese: bool = True
     use_smart_keywords: bool = False
+    popular_first: bool | None = None
 
 
 class MaterialsPreflightRequest(BaseModel):
@@ -273,3 +358,33 @@ class TimelineItemPatch(BaseModel):
     source_ref: dict[str, Any] | None = None
     transform: dict[str, Any] | None = None
     style: dict[str, Any] | None = None
+
+
+class TimelineItemCreateRequest(BaseModel):
+    scene_id: str
+    type: Literal["text", "caption", "overlay", "icon", "transition", "music", "sfx"]
+    layer_id: str | None = None
+    start_seconds: float | None = Field(default=None, ge=0)
+    end_seconds: float | None = Field(default=None, ge=0)
+    source_ref: dict[str, Any] = Field(default_factory=dict)
+    transform: dict[str, Any] = Field(default_factory=dict)
+    style: dict[str, Any] = Field(default_factory=dict)
+
+
+class TransitionRequest(BaseModel):
+    transition_id: str = "fade"
+    duration_seconds: float = Field(default=0.35, ge=0.05, le=1.5)
+
+
+class SFXSuggestRequest(BaseModel):
+    max_suggestions: int = Field(default=12, ge=1, le=40)
+    include_caption_words: bool = True
+    include_transitions: bool = True
+    include_icons: bool = True
+    include_text: bool = True
+    include_hook: bool = True
+
+
+class SFXApplyRequest(BaseModel):
+    suggestion_ids: list[str] | None = None
+    volume_overrides: dict[str, float] = Field(default_factory=dict)

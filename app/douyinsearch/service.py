@@ -67,9 +67,15 @@ class DouyinSearchService:
                 diagnostics = {"direct_api_error": error.to_payload()}
 
         if strategy_used == "browser":
-            browser_results, browser_diagnostics = await self._search_browser_with_retries(search_keyword, request.limit)
+            browser_results, browser_diagnostics = await self._search_browser_with_retries(
+                search_keyword,
+                request.limit,
+                request.popular_first,
+            )
             results = browser_results
             diagnostics = {**diagnostics, **browser_diagnostics}
+
+        results, diagnostics = self._apply_popular_order(results, diagnostics, request.popular_first)
 
         if not results:
             raise DouyinSearchError(NO_RESULTS, "No Douyin results were found.", retryable=True)
@@ -99,15 +105,54 @@ class DouyinSearchService:
     async def close(self) -> None:
         await self.browser.close()
 
-    async def _search_browser_with_retries(self, search_keyword: str, limit: int):
+    async def _search_browser_with_retries(self, search_keyword: str, limit: int, popular_first: bool = False):
         last_diagnostics = {}
         for attempt in range(1, 4):
-            results, diagnostics = await self.browser.search(search_keyword, limit)
+            results, diagnostics = await self.browser.search(search_keyword, limit, popular_first=popular_first)
             diagnostics["attempt"] = attempt
             if results:
                 return results, diagnostics
             last_diagnostics = diagnostics
         return [], last_diagnostics
+
+    def _apply_popular_order(self, results, diagnostics: dict, requested: bool):
+        diagnostics = dict(diagnostics or {})
+        popularity = dict(diagnostics.get("popularity") or {})
+        if not requested:
+            popularity.update(
+                {
+                    "requested": False,
+                    "applied": False,
+                    "method": "relevance",
+                    "publish_window_days": 0,
+                }
+            )
+            diagnostics["popularity"] = popularity
+            return results, diagnostics
+        if popularity.get("applied"):
+            popularity.setdefault("requested", True)
+            popularity.setdefault("publish_window_days", 180)
+            diagnostics["popularity"] = popularity
+            return results, diagnostics
+
+        has_complete_likes = bool(results) and all("digg_count" in (result.stats or {}) for result in results)
+        if has_complete_likes:
+            results = sorted(results, key=lambda result: int((result.stats or {}).get("digg_count") or 0), reverse=True)
+            popularity = {
+                "requested": True,
+                "applied": True,
+                "method": "client_digg_count",
+                "publish_window_days": 180,
+            }
+        else:
+            popularity = {
+                "requested": True,
+                "applied": False,
+                "method": "popular_unavailable",
+                "publish_window_days": 180,
+            }
+        diagnostics["popularity"] = popularity
+        return results, diagnostics
 
     async def _translate(self, keyword: str) -> str:
         try:

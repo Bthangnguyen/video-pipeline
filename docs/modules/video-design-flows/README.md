@@ -13,6 +13,12 @@ Project Start
 -> Scene Plan & Material Review
 -> Studio Timeline
 -> Trim Selection & Render Assembly
+-> Studio Creative Controls
+-> Studio Continuity & Render
+-> Studio Transition, Caption Drag & Playhead
+-> Studio Audio, BGM & Event-Driven SFX
+-> Platform-Native Visual Search
+-> Shared Search Pools & Popular-First Search
 ```
 
 Each flow should feel like a dedicated screen, not a section in one long form.
@@ -25,6 +31,12 @@ Each flow should feel like a dedicated screen, not a section in one long form.
 - [04 Scene Plan And Material Review Flow](04-scene-plan-material-review-flow.md)
 - [05 Studio Timeline Flow](05-studio-timeline-flow.md)
 - [06 Trim Selection And Render Assembly Flow](06-trim-render-flow.md)
+- [07 Studio Creative Controls Flow](07-studio-creative-controls-flow.md)
+- [08 Studio Continuity And Render Flow](08-studio-continuity-render-flow.md)
+- [09 Studio Transition, Caption Drag, And Playhead Flow](09-studio-transition-caption-playhead-flow.md)
+- [10 Studio Audio, BGM, And Event-Driven SFX Flow](10-studio-audio-bgm-sfx-flow.md)
+- [11 Platform-Native Visual Search Flow](11-platform-native-visual-search-flow.md)
+- [12 Shared Search Pools And Popular-First Search Flow](12-shared-search-pools-popular-first-flow.md)
 
 ## Shared Shell
 
